@@ -1,0 +1,33 @@
+# Python
+CLAUDE*
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.env/
+env/
+
+# Numba / tooling caches
+.numba_cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Large external data (e.g. CERN Open Data downloads); keep scripts, not data
+data/raw/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+smoketest.py

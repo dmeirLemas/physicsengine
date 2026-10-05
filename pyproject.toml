@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "physengine"
+version = "0.1.0"
+description = "A modular physics simulator: black holes, massive-body systems, galaxy collisions, particle physics."
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "numba",
+    "moderngl",
+    "moderngl-window",
+    "glfw",
+    "imgui-bundle",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+physengine = "physengine.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
