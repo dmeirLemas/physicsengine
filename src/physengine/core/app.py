@@ -1,10 +1,14 @@
 import moderngl_window as mglw
+from imgui_bundle import imgui
 from moderngl_window.timers.clock import Timer
+
+from physengine.core.camera import OrbitCamera
+from physengine.core.imgui_renderer import ImGuiRenderer
 
 
 class Window:
     def __init__(self, W, H, module, title="TEST") -> None:
-        self.pause_flag = False
+        self.pause_flag = True
         self.W = W
         self.H = H
 
@@ -22,38 +26,73 @@ class Window:
         mglw.activate_context(window=self.window)
         self.ctx = self.window.ctx
 
+        imgui.create_context()
+        self.imgui_ = ImGuiRenderer(self.window)
+
         self.window.resize_func = self.on_resize
         self.window.key_event_func = self.on_key
+
+        self.window.mouse_drag_event_func = self.on_mouse_drag
+        self.window.mouse_scroll_event_func = self.on_mouse_scroll
+        self.window.mouse_position_event_func = self.on_mouse_position
+        self.window.mouse_press_event_func = self.on_mouse_press
+        self.window.mouse_release_event_func = self.on_mouse_release
+        self.window.unicode_char_entered_func = self.on_char
+
+        self.camera = OrbitCamera(W, H)
+
+    def on_mouse_drag(self, x, y, dx, dy):
+        self.imgui_.mouse_drag_event(x, y, dx, dy)
+        if not imgui.get_io().want_capture_mouse:
+            self.camera.orbit(dx, dy)
+
+    def on_mouse_scroll(self, x, y):
+        self.imgui_.mouse_scroll_event(x, y)
+        if not imgui.get_io().want_capture_mouse:
+            self.camera.zoom(y)
+
+    def on_mouse_position(self, x, y, dx, dy):
+        self.imgui_.mouse_position_event(x, y, dx, dy)
+
+    def on_mouse_press(self, x, y, button):
+        self.imgui_.mouse_press_event(x, y, button)
+
+    def on_mouse_release(self, x, y, button):
+        self.imgui_.mouse_release_event(x, y, button)
+
+    def on_char(self, char):
+        self.imgui_.unicode_char_entered(char)
 
     def on_resize(self, W, H):
         self.W = W
         self.H = H
+
+        self.imgui_.resize(W, H)
+        self.camera.on_resize(W, H)
 
     def on_key(self, key, action, modifiers):
         ACTION_PRESS = self.window.keys.ACTION_PRESS
         SPACE = self.window.keys.SPACE
         ESC = self.window.keys.ESCAPE
 
-        if key == SPACE and action == ACTION_PRESS:
-            self.pause_flag = not self.pause_flag
+        self.imgui_.key_event(key, action, modifiers)
+        if not imgui.get_io().want_capture_keyboard:
+            if key == SPACE and action == ACTION_PRESS:
+                self.pause_flag = not self.pause_flag
 
-        if key == ESC and action == ACTION_PRESS:
-            self.window.close()
+            if key == ESC and action == ACTION_PRESS:
+                self.window.close()
 
     def run(self):
         try:
             self.timer = Timer()
             self.timer.start()
-            print_time = 0
 
             if self.active_module is not None:
                 self.active_module.setup(self.ctx)
 
             while not self.window.is_closing:
                 curr_time, frame_time = self.timer.next_frame()
-                if curr_time - print_time >= 1.0:
-                    print_time = curr_time
-                    print(self.step_count, self.frame_counter)
 
                 if not self.pause_flag:
                     self.accumulator += frame_time * self.time_scale
@@ -65,7 +104,24 @@ class Window:
 
                 self.window.clear(0.1, 0.2, 0.3)
                 if self.active_module is not None:
-                    self.active_module.render(self.ctx, self.W, self.H)
+                    self.active_module.render(self.ctx, self.camera)
+
+                self.imgui_.begin_frame(frame_time)
+
+                imgui.begin("Simulation")
+
+                imgui.text(f"{self.step_count, self.frame_counter}")
+                _, self.pause_flag = imgui.checkbox("Pause", self.pause_flag)
+                _, self.time_scale = imgui.slider_float("Time Scale", self.time_scale, 0.1, 10.0)
+                if self.active_module is not None:
+                    self.active_module.draw_ui()
+
+                imgui.end()
+
+                if self.active_module is not None:
+                    imgui.text(f"{self.active_module.diagnostics()}")
+
+                self.imgui_.end_frame()
                 self.window.swap_buffers()
 
                 self.frame_counter += 1
@@ -75,7 +131,10 @@ class Window:
                 try:
                     self.active_module.teardown()
                 finally:
-                    self.window.destroy()
+                    pass
+
+            self.imgui_.shutdown()
+            self.window.destroy()
 
     def physics_step(self):
         if self.active_module is not None:

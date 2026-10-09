@@ -1,17 +1,19 @@
 import numpy as np
+from imgui_bundle import imgui
 
 from physengine.core.module import BaseModule
 
 VERTEX = """
 #version 460 core
 uniform float angle;
+uniform mat4 view_proj;
 in vec2 in_position;              // one value per vertex, from the buffer
 void main() {
     mat2 rot = mat2(
         cos(angle), sin(angle),
         -sin(angle), cos(angle)
     );
-    gl_Position = vec4(rot * in_position, 0.0, 1.0);   // built-in output: clip-space position
+    gl_Position = view_proj * vec4(rot * in_position, 0.0, 1.0);
 }
 """
 
@@ -41,9 +43,17 @@ class Triangle(BaseModule):
     def step(self, dt):
         self.angle += self.angular_speed * dt
 
-    def render(self, ctx, w, h):
+    def render(self, ctx, camera):
         self.program["angle"].value = self.angle
+
+        view_proj = camera.view_proj()
+        self.program["view_proj"].write(view_proj.T.astype("f4").tobytes())
+
         self.vao.render()
 
-    def draw_ui(self): ...
+    def draw_ui(self):
+        imgui.begin("Simulation")
+        _, self.angular_speed = imgui.slider_float("Angular Speed", self.angular_speed, 0.0, 100.0)
+        imgui.end()
+
     def teardown(self): ...

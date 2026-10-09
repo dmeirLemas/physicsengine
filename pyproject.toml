@@ -14,6 +14,7 @@ dependencies = [
     "moderngl-window",
     "glfw",
     "imgui-bundle",
+    "PyOpenGL",  # used by imgui-bundle's OpenGL backend, see core/imgui_renderer.py
 ]
 
 [project.optional-dependencies]
