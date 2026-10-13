@@ -1,10 +1,9 @@
 from physengine.core.app import Window
-from physengine.modules.triangle import Triangle
+from physengine.modules.registry import REGISTRY
 
 
 def main():
-    triangle = Triangle()
-    window = Window(640, 480, triangle)
+    window = Window(640, 480, REGISTRY)
     window.run()
 
 

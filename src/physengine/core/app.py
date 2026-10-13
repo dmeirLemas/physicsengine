@@ -4,21 +4,32 @@ from moderngl_window.timers.clock import Timer
 
 from physengine.core.camera import OrbitCamera
 from physengine.core.imgui_renderer import ImGuiRenderer
+from physengine.core.module import BaseModule
 
 
 class Window:
-    def __init__(self, W, H, module, title="TEST") -> None:
+    def __init__(self, W, H, registry: dict, title="TEST") -> None:
         self.pause_flag = True
         self.W = W
         self.H = H
 
-        self.active_module = module
+        if not registry:
+            raise Exception("Empty registry")
+
+        self.registry = registry
+
+        self.combo_box_items = list(registry.keys())
+
+        self.active_module: BaseModule
+        self.active_module_name: str | None = None
+
+        self.pending_module_name: str | None = None
+
         self.time_scale = 1.0
         self.step_count = 0
         self.frame_counter = 0
 
         self.accumulator = 0.0
-        self.dt = self.active_module.dt if self.active_module is not None else 1.0 / 240.0
         self.max_accumulator = 0.25
 
         window_cls = mglw.get_local_window_cls("glfw")
@@ -88,10 +99,14 @@ class Window:
             self.timer = Timer()
             self.timer.start()
 
-            if self.active_module is not None:
-                self.active_module.setup(self.ctx)
+            first_key = next(iter(self.registry))
+            self.switch(first_key)
 
             while not self.window.is_closing:
+                if self.pending_module_name is not None:
+                    self.switch(self.pending_module_name)
+                    self.pending_module_name = None
+
                 curr_time, frame_time = self.timer.next_frame()
 
                 if not self.pause_flag:
@@ -103,23 +118,29 @@ class Window:
                         self.accumulator -= self.dt
 
                 self.window.clear(0.1, 0.2, 0.3)
-                if self.active_module is not None:
-                    self.active_module.render(self.ctx, self.camera)
+                self.active_module.render(self.ctx, self.camera)
 
                 self.imgui_.begin_frame(frame_time)
 
                 imgui.begin("Simulation")
 
+                idx = self.combo_box_items.index(self.active_module_name)
+
+                changed, new_idx = imgui.combo("Modules", idx, self.combo_box_items)
+
+                if changed:
+                    self.pending_module_name = self.combo_box_items[new_idx]
+
                 imgui.text(f"{self.step_count, self.frame_counter}")
                 _, self.pause_flag = imgui.checkbox("Pause", self.pause_flag)
                 _, self.time_scale = imgui.slider_float("Time Scale", self.time_scale, 0.1, 10.0)
-                if self.active_module is not None:
-                    self.active_module.draw_ui()
 
+                imgui.text("Specs")
+                for spec in self.active_module.specs:
+                    spec.draw(self.active_module)
+
+                imgui.text(f"{self.active_module.diagnostics()}")
                 imgui.end()
-
-                if self.active_module is not None:
-                    imgui.text(f"{self.active_module.diagnostics()}")
 
                 self.imgui_.end_frame()
                 self.window.swap_buffers()
@@ -127,16 +148,34 @@ class Window:
                 self.frame_counter += 1
 
         finally:
-            if self.active_module is not None:
-                try:
-                    self.active_module.teardown()
-                finally:
-                    pass
-
+            if self.active_module_name is not None:
+                self.active_module.teardown()
             self.imgui_.shutdown()
             self.window.destroy()
 
+    def switch(self, class_name):
+        if self.active_module_name is not None:
+            for spec in self.active_module.specs:
+                if not hasattr(self.active_module, spec.attr_name):
+                    raise Exception(
+                        f"{self.active_module} missing {spec.attr_name} required in {spec}"
+                    )
+
+            self.active_module.teardown()
+        if class_name not in self.registry:
+            raise Exception("Class to switch does not exist in the registry.")
+
+        self.active_module = self.registry[class_name]()
+        self.active_module.setup(self.ctx)
+        self.dt = self.active_module.dt
+
+        self.step_count = 0
+        self.frame_counter = 0
+
+        self.accumulator = 0.0
+        self.pause_flag = True
+        self.active_module_name = class_name
+
     def physics_step(self):
-        if self.active_module is not None:
-            self.active_module.step(self.active_module.dt)
-            self.step_count += 1
+        self.active_module.step(self.active_module.dt)
+        self.step_count += 1
