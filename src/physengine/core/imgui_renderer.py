@@ -129,6 +129,28 @@ class ImGuiRenderer(ModernglWindowMixin):
 
     # ------------------------------------------------------------------ frame
 
+    # GLFW key codes of the left and right variant of each modifier.
+    _MODIFIER_KEYS = (
+        (imgui.Key.mod_ctrl, (glfw.KEY_LEFT_CONTROL, glfw.KEY_RIGHT_CONTROL)),
+        (imgui.Key.mod_shift, (glfw.KEY_LEFT_SHIFT, glfw.KEY_RIGHT_SHIFT)),
+        (imgui.Key.mod_alt, (glfw.KEY_LEFT_ALT, glfw.KEY_RIGHT_ALT)),
+    )
+
+    def key_event(self, key, action, modifiers) -> None:
+        """Forward a key event, including modifier state.
+
+        moderngl-window's key map leaves out Ctrl, Shift and Alt, so ImGui never
+        learns they are held (``io.key_ctrl`` stays False and shortcuts such as
+        Ctrl+A in text fields do nothing).  Report them as ImGui's modifier keys.
+        The window updates its pressed-key map before calling this, so the
+        state of both left and right variants is current here.
+        """
+        super().key_event(key, action, modifiers)
+        for mod_key, variants in self._MODIFIER_KEYS:
+            if key in variants:
+                down = any(self.wnd.is_key_pressed(k) for k in variants)
+                self.io.add_key_event(mod_key, down)
+
     def begin_frame(self, frame_time: float) -> None:
         """Start an ImGui frame.
 

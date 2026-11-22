@@ -14,7 +14,7 @@ Reference values:
 
 import numpy as np
 
-from physengine.modules.nbody import (
+from physengine.modules.nbodystate import (
     NBodyState,
     acc,
     energy,
