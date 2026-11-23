@@ -222,6 +222,10 @@ class Window:
                 self.active_module.draw_ui()
                 if self.active_module.reset_requested:
                     self.request_reset()
+                wanted_module = self.active_module.switch_requested
+                if wanted_module is not None and wanted_module in self.registry:
+                    self.pending_module_name = wanted_module
+                    self.pending_keep_params = False
 
                 self.imgui_.end_frame()
                 self.window.swap_buffers()

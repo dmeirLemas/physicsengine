@@ -28,7 +28,9 @@ Status as of 2026-11-20.
   bodies on exact geodesics, lensed, redshifted, with light-travel time;
   plunging body and tidal disruption; 1PN and black holes in the N-body
   module. Details and checks in "Module 3, black holes" below.
-- **Module 4, particle physics:** not started.
+- **Module 4, particle physics:** first version working (Claude under
+  override, 2026-11-22; review the physics). Event display in a CMS-like
+  detector with invariant-mass histogram. See "Module 4" below.
 
 ## Galaxies: still to do
 
@@ -210,3 +212,133 @@ body type; bodies drawn lensed; both a plunging body and a tidal disruption.
       test_postnewtonian.py (207 tests in all pass).
 - [ ] Possible: Kerr images of many particles (GPU solver), a rotating disc
       texture, binary black holes (needs 2.5PN radiation reaction).
+
+## Home screen, save and load (2026-11-23)
+
+- [x] Home screen (homemodule.py), first in the registry: a description of
+      each module with an Open button, and each module's saved scenarios.
+      Needed one addition to the core, approved: BaseModule.switch_requested
+      (a registry name), honoured by the app loop after draw_ui.
+- [x] Save / load of custom scenarios (scenario_files.py; JSON files in
+      saves/<kind>/ at the top of the repository): N-body (whatever is on
+      screen, loaded as the Custom scene), black hole (scene, spin, hole
+      mass, star and the bodies added in the Bodies window), galaxies (the
+      setup window's models, orbit and angles). tests/test_scenarios.py
+      (6 round-trip tests).
+- N-body Restart after an edit now keeps the scene's pace, camera tilt and
+  sheet setting (the restart point used to drop them).
+- [ ] `saves/` and `data/` are not in .gitignore: decide before committing.
+
+## Module 4, particle physics
+
+Files: particle_data.py (PDG values), particle_kinematics.py (four-momenta,
+boosts, two-body and n-body phase-space decays, leptonic V-A decays,
+Breit-Wigner), particle_material.py (Bethe energy loss, Highland
+scattering, bremsstrahlung, conversions, shower profiles, the detector's
+materials), particle_tracks.py (helix in the solenoid and return field,
+stepping through the material), particle_events.py (scenes, Higgs,
+reconstruction), particle_renderer.py, particlemodule.py,
+particle_opendata.py, tests/test_particles.py (29 tests; 2 need the
+downloaded data and are skipped without it).
+
+- [x] Scenes: Z -> mu mu, Z -> e e, Z -> tau tau, J/psi -> mu mu, strange
+      particles (K0_S, Lambda), busy collision, Higgs -> Z Z* -> 4 leptons.
+- [x] Checked against published values: p* of K0_S -> pi pi (206 MeV),
+      Lambda -> p pi (101 MeV), Z -> mu mu (45.594 GeV); helix radius 3.336 m
+      for 1 GeV in 1 T; mean decay length beta gamma c tau; Michel spectrum
+      (mean x = 0.7); minimum ionisation in PbWO4 (10.2 MeV/cm); Highland
+      angle; shower maximum; four-momentum in every decay and energy over
+      whole events (ionisation included); Z peak 91.19, K0_S 0.4976, Higgs
+      125.25 GeV; Z -> e e recovered through the radiated photons; muons
+      need ~4.5 GeV to cross the iron.
+- [x] Display: labels on particles and detector layers, legend, commentary
+      of each event in words, continuous playback (next event prepared in a
+      background thread), playback ends when 97% of the energy has settled.
+- [x] 2026-11-22: click a particle (or the collision point, for a boson)
+      for its properties and what happened to it in this event; a list of
+      the event's particles to click; incoming protons and a flash before
+      each event; a close-up diagram of the production mechanism (an
+      illustration); real CMS events (particle_opendata.py: CERN Open Data
+      record 545, CC0; files go to data/opendata/, 15 MB, ignored by git):
+      Z, J/psi and all muon pairs, the last with a logarithmic spectrum
+      showing J/psi, psi', Upsilon and Z.
+- Still not simulated: the collision itself (momenta and particle mix are
+  drawn from distributions matched to measured averages; no jets, no
+  correlations: that is Pythia's job, out of scope by CLAUDE.md). Showers
+  are parametrised profiles, not particle cascades; energy loss is the mean
+  only (no Landau fluctuations, no delta rays); hadron interactions in the
+  tracker are ignored; H -> 4 leptons has no angular correlations.
+- [ ] Possible next: B and D decay chains with zoomable displaced vertices,
+      real CERN Open Data dimuon events through the same display, tau decays
+      through the rho and a1, an "end view" camera preset.
+
+## Verification and fixes (2026-11-23)
+
+An independent review of modules 1-4, the home screen and save/load found
+the problems below; four agents fixed them (physics included, under the
+user's override). Headless runs and offscreen renders only: NOBODY HAS
+CLICKED THROUGH THE REAL WINDOW since.
+
+Black hole (blackhole_scenes.py, blackhole_star.py, blackholemodule.py):
+- [x] Star scenes are laid out in units of the tidal radius r_t: the star
+      starts at max(1.6 r_t, 40 M), is one object until r_t (release within
+      0.3% of r_t for 10^4..10^8 Msun), and is swallowed whole from 10^8.2.
+      Before, it started at 40 M, inside r_t below 10^6.2, and was released
+      on frame 1. Default mass now: 97% eaten (was 78-81%).
+- [x] Scene clock (r_t reached after 4 s at Speed 40, slows near the hole),
+      camera follows the star in (setting, lets go when the user zooms),
+      star drawn at least 6 px (factor shown in the UI), painted disc hidden
+      in star scenes, dotted r_t circle.
+- [x] Released gas star is supported by pressure only (half-mass radius
+      0.73 -> 0.68 over 6 dynamical times; was 0.73 -> 1.61).
+- [x] Load is atomic; malformed saves fall back with a notice.
+- Limits: 10^7..10^8 the tear is within 10 M and over in under a second;
+  "with gas" still over the 20 ms frame budget; the SPH temperature readout
+  gives odd values (0 K, 1e10 K), not looked at.
+
+N-body (nbodymodule.py, nbodystate.py, nbody_plunge.py, nbody_editor.py):
+- [x] Slow motion is for visible events only and ends (hole_pace replaces
+      hole_timescale; bound debris that cannot be resolved is accreted,
+      Rees 1988). The two stalls (star dropped at 0.1 AU from a 10 Msun
+      hole; body on a 0.005 AU orbit) are back at normal pace within 30
+      steps. A planet on a stable orbit near a hole now runs at true pace.
+- [x] One whole-or-torn rule: torn inside r_t unless r_t is inside the
+      horizon, also inside the handover sphere.
+- [x] Every swallowing path fades, continuously (within ~2%).
+- [x] New holes default to 1e6 Msun, are drawn at horizon size (4 px
+      minimum), with placement text saying torn or swallowed.
+- [x] Torn-star scene: star cross-fades into its gas, blobs stretched along
+      the stream.
+- [x] Stable body ids (identity, selection, follow kept across close
+      passes; unique names); saves include close-pass bodies; malformed
+      saves fall back.
+- [ ] 10 Msun preset: the tear is 1-2 px at the default zoom (announced,
+      visible after Follow).
+- [ ] A compact body or second hole on a sub-pixel orbit still exhausts the
+      step budget (15 ms/step).
+- [ ] Trails vanish at handover and at the tear (needs nbody_trails.py).
+
+Particles:
+- [x] Tau visible mass no longer double-counts converted photons; bad data
+      rows and worker errors no longer hang; bulk fill in the background.
+- [x] Every listed decay is drawn at its PDG fraction (rest in a labelled
+      stand-in mode); tau -> pi pi0 nu via rho, 3 pi nu via a1.
+- [x] Highland summed over steps 8.76 mrad (was 7.4); minimum ionisation
+      within 0.07% of PDG (Sternheimer density effect).
+- [x] Momentum resolution from Gluckstern + multiple scattering with the
+      real field (35 um points, 13 layers: chosen, not from a reference);
+      momenta are still smeared truth, not fitted from hits. Tracks with
+      fewer than 3 layers give no mass (11% of Z -> mu mu).
+- [x] Production step labelled "Illustration (not simulated)"; disclaimer
+      always visible; recorded events carry no mechanism.
+- [ ] CHECK AGAINST THE PDG: the numbers added here were written from
+      memory (rarer tau fractions, K modes, rho and a1 widths, Sternheimer
+      parameters).
+
+Save/load, home, galaxy:
+- [x] Files carry kind and format version; wrong-kind or broken files give
+      a message; names are exact, overwrite asks; galaxy Save stores the
+      running setup; home text within the accuracy scope; saves/ and data/
+      in .gitignore.
+- [ ] Galaxy saves accept absurdly small particle counts (bounds are a
+      physics choice).

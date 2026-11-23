@@ -31,3 +31,7 @@ data/raw/
 .claude/settings.local.json
 
 smoketest.py
+
+# Scenarios saved from the application, and downloaded data (CERN Open Data)
+saves/
+data/

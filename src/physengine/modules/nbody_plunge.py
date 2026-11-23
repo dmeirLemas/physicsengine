@@ -36,6 +36,21 @@ matched to first order (1PN "harmonic" radius = Schwarzschild radius
 handed over (a geodesic assumes a light body): it merges at the capture
 radius as before.
 
+A body that is not debris and whose tidal radius R (M / m)^(1/3) lies inside
+the handover sphere but outside the horizon is still whole when it is handed
+over. It is followed like any other until it comes inside that radius, and
+is then given back to the module to be torn apart (`advance` reports it).
+
+Display. The module's coordinates put the horizon at G M / c^2, but a hole is
+drawn as a disc of its areal radius 2 G M / c^2. So that a body freezes on
+the edge of the disc as drawn, and not underneath it, its drawn distance
+from the hole is stretched smoothly from the module's radius at the handover
+sphere to the areal radius at the horizon (`display_radius`). Its light is
+shown redder and dimmer by the redshift factor above, but only down to
+FREEZE_LOOK of the way: the real fade e-folds every ~4 G M / c^3, far too
+fast to see, so the module finishes it in slow motion (see
+nbodymodule.FADE_SECONDS). Both are display only.
+
 When a simulated step is much longer than G M / c^3 (a stellar-mass hole in
 a planetary scene: microseconds against days) the whole passage happens
 within one step and nothing of it can be seen: the body is swallowed or
@@ -48,9 +63,41 @@ from physengine.modules.geodesics import BodySystem, energy
 
 # Leaves when it is this far outside the handover sphere (20 G M / c^2 in the
 # module's coordinates = 21 here), so that it is not handed straight back.
-EXIT_RADIUS = 1.1 * 21.0
+HANDOVER = 21.0
+EXIT_RADIUS = 1.1 * HANDOVER
 MAX_DURATION = 200.0  # most G M / c^3 followed in one step (the rest waits for the next)
 CAPACITY = 400
+# Display: how far the drawn look goes towards fully redshifted while the
+# body is still on its orbit (1 = not at all, 0 = black at the horizon).
+FREEZE_LOOK = 0.7
+# Display: a body frozen on the horizon is drawn with its centre this many of
+# its drawn radii outside the edge of the hole's disc, moved there gradually
+# from Schwarzschild radius FROZEN_FROM inward.
+FROZEN_OUTSIDE = 0.7
+FROZEN_FROM = 6.0
+# A body is watched in slow motion (nbodymodule._close_pace) for this many
+# G M / c^3 after it is handed over: a plunge or a passage takes 100 to 300.
+# One that stays longer is on a bound orbit inside the sphere, which would
+# keep the whole scene in slow motion for good.
+WATCH_DURATION = 1500.0
+TEAR_STEP = 4.0  # G M / c^3 between checks of a whole body against its tidal radius
+
+
+def redshift_look(color, g):
+    """Display colour of a body whose light is redshifted by g (1: as emitted, 0: gone):
+    blue and green go first, then the whole dims."""
+    g = np.clip(np.asarray(g, dtype=float), 0.0, 1.0)[..., None]
+    return np.asarray(color, dtype=float) * np.concatenate([np.ones_like(g), g, g * g], -1) * g
+
+
+def display_radius(r, size=0.0):
+    """Drawn distance from the hole [G M / c^2] of a body at Schwarzschild radius r
+    (see the module docstring): r - 1 at the handover sphere, r at the horizon.
+    With `size`, the body's drawn radius in the same units, it stops
+    FROZEN_OUTSIDE of that short of the disc's edge, so that it is seen
+    resting on the horizon and not half hidden by the disc."""
+    out = r - np.clip((r - 2.0) / (HANDOVER - 2.0), 0.0, 1.0)
+    return out + FROZEN_OUTSIDE * size * np.clip((FROZEN_FROM - r) / (FROZEN_FROM - 2.0), 0.0, 1.0)
 
 
 class CloseBodies:
@@ -59,15 +106,17 @@ class CloseBodies:
     def __init__(self):
         self.system = BodySystem(np.zeros((0, 3)), np.zeros((0, 3)))
         self.system.OUTER_STEP = 20.0  # no pulls between them: one drift per call
-        self.meta = []  # per body: dict (name, colour, masses, ...)
+        self.meta = []  # per body: dict (id, name, colour, masses, ...)
         self.exit_radius = []
         self.g0 = []
+        self.age = []  # G M / c^3 since each was handed over
 
     def add(self, x, w, meta):
         self.system.add(x, w)
         self.meta.append(meta)
         self.exit_radius.append(EXIT_RADIUS)
         self.g0.append((1.0 - 2.0 / np.linalg.norm(x)) / max(energy(x[None], w[None])[0], 1e-12))
+        self.age.append(0.0)
 
     def remove(self, gone):
         keep = [k for k in range(len(self.meta)) if k not in gone]
@@ -78,6 +127,15 @@ class CloseBodies:
         self.meta = [self.meta[k] for k in keep]
         self.exit_radius = [self.exit_radius[k] for k in keep]
         self.g0 = [self.g0[k] for k in keep]
+        self.age = [self.age[k] for k in keep]
+
+    def look(self):
+        """Redshift factor to draw each body with: 1 where it entered,
+        FREEZE_LOOK at the horizon."""
+        s = self.system
+        r = np.linalg.norm(s.x, axis=1)
+        g = (1.0 - 2.0 / r) / np.maximum(energy(s.x, s.w), 1e-12) / np.array(self.g0)
+        return FREEZE_LOOK + (1.0 - FREEZE_LOOK) * np.clip(g, 0.0, 1.0)
 
 
 def to_schwarzschild(rel, vel, r_g, c):
@@ -89,12 +147,16 @@ def to_schwarzschild(rel, vel, r_g, c):
     four-velocity, 1 = (dt/dtau)^2 [(1 - 2/r) - v_r^2 / (1 - 2/r) - v_t^2].
     """
     d = np.linalg.norm(rel)
+    if not d > 0.0:
+        return None
     n = rel / d
     r = d / r_g + 1.0
     v = np.asarray(vel) / c
     v_r = v @ n
     v_t = (v - v_r * n) * (r / (d / r_g))
     lapse = 1.0 - 2.0 / r
+    if lapse <= 0.0:
+        return None
     norm = lapse - v_r**2 / lapse - v_t @ v_t
     if norm <= 0.0:
         return None
@@ -114,43 +176,54 @@ def from_schwarzschild(x, w, r_g, c):
 
 
 class ClosePasses:
+    """All bodies on close passes. Holes are known by a key that never changes
+    (the module's body id), not by their display name."""
+
     def __init__(self, G, c):
         self.G, self.c = G, c
-        self.holes = {}  # hole name -> CloseBodies
+        self.holes = {}  # hole key -> CloseBodies
 
     @property
     def count(self):
         return sum(len(h.meta) for h in self.holes.values())
 
-    def enter(self, hole_name, hole_mass, rel, vel, meta):
-        """Hand a body over. Returns False if it cannot be followed (then merge it)."""
+    def enter(self, hole_key, hole_mass, rel, vel, meta):
+        """Hand a body over. Returns False if it cannot be followed (then merge it).
+
+        `meta` may hold "tidal": the body's tidal radius [length units of
+        rel], if it is to be torn on coming inside it (see `advance`).
+        """
         if self.count >= CAPACITY:
             return False
         state = to_schwarzschild(rel, vel, self.G * hole_mass / self.c**2, self.c)
         if state is None or np.linalg.norm(state[0]) <= 2.05:
             return False
-        self.holes.setdefault(hole_name, CloseBodies()).add(state[0], state[1], meta)
+        self.holes.setdefault(hole_key, CloseBodies()).add(state[0], state[1], meta)
         return True
 
     def advance(self, dt, hole_masses):
-        """Follow all bodies for `dt` of simulated time. `hole_masses` maps the names of
+        """Follow all bodies for `dt` of simulated time. `hole_masses` maps the keys of
         the holes that still exist to their masses.
 
-        Returns (swallowed, left): lists of (hole name, meta, direction from the hole
-        where it went in) and of (hole name, meta, relative position, relative velocity).
+        Returns (swallowed, left, torn): lists of (hole key, meta, direction
+        from the hole where it went in), of (hole key, meta, relative
+        position, relative velocity) for bodies that left the sphere, and
+        the same for whole bodies that came inside their tidal radius.
         """
-        swallowed, left = [], []
-        for name in list(self.holes):
-            close = self.holes[name]
-            if name not in hole_masses:
-                del self.holes[name]  # its hole is gone (removed, or merged into another)
+        swallowed, left, torn = [], [], []
+        for key in list(self.holes):
+            close = self.holes[key]
+            if key not in hole_masses:
+                del self.holes[key]  # its hole is gone (removed, or merged into another)
                 continue
-            r_g = self.G * hole_masses[name] / self.c**2
+            r_g = self.G * hole_masses[key] / self.c**2
             remaining = min(self.c * dt / r_g, MAX_DURATION)
             while remaining > 1e-9 and close.meta:
-                step = min(remaining, 20.0)
+                tearable = any(m.get("tidal", 0.0) > 0.0 for m in close.meta)
+                step = min(remaining, TEAR_STEP if tearable else 20.0)
                 close.system.advance(step)
                 remaining -= step
+                close.age = [a + step for a in close.age]
                 s = close.system
                 r = np.linalg.norm(s.x, axis=1)
                 out = (
@@ -158,38 +231,62 @@ class ClosePasses:
                 )
                 gone = []
                 for k in np.flatnonzero(~s.alive):
-                    swallowed.append((name, close.meta[k], s.x[k] / r[k]))
+                    swallowed.append((key, close.meta[k], s.x[k] / r[k]))
                     gone.append(int(k))
                 for k in np.flatnonzero(out):
                     rel, vel = from_schwarzschild(s.x[k], s.w[k], r_g, self.c)
-                    left.append((name, close.meta[k], rel, vel))
+                    left.append((key, close.meta[k], rel, vel))
                     gone.append(int(k))
+                for k in np.flatnonzero(s.alive & ~out):
+                    tidal = close.meta[k].get("tidal", 0.0)
+                    if tidal > 0.0 and (r[k] - 1.0) * r_g < tidal:
+                        rel, vel = from_schwarzschild(s.x[k], s.w[k], r_g, self.c)
+                        torn.append((key, close.meta[k], rel, vel))
+                        gone.append(int(k))
                 if gone:
                     close.remove(gone)
             if not close.meta:
-                del self.holes[name]
-        return swallowed, left
+                del self.holes[key]
+        return swallowed, left, torn
 
-    def sprites(self, names, pos, hole_masses):
-        """(positions, colours, radii, kinds) of the bodies being followed."""
-        out_pos, out_col, out_rad, out_kind = [], [], [], []
-        for name, close in self.holes.items():
-            if name not in hole_masses:
+    def watched(self, hole_key):
+        """Whether any body round this hole was handed over less than WATCH_DURATION ago."""
+        close = self.holes.get(hole_key)
+        return close is not None and any(a < WATCH_DURATION for a in close.age)
+
+    def bodies(self, hole_masses):
+        """(hole key, meta, relative position, relative velocity) of every body being
+        followed, in the module's coordinates (for saving, and for the camera)."""
+        out = []
+        for key, close in self.holes.items():
+            if key not in hole_masses:
                 continue
-            centre = pos[names.index(name)]
-            r_g = self.G * hole_masses[name] / self.c**2
+            r_g = self.G * hole_masses[key] / self.c**2
+            s = close.system
+            for k, meta in enumerate(close.meta):
+                rel, vel = from_schwarzschild(s.x[k], s.w[k], r_g, self.c)
+                out.append((key, meta, rel, vel))
+        return out
+
+    def sprites(self, hole_pos, hole_masses, sizes=None):
+        """(metas, positions, redshift factors) of the bodies being followed, as drawn
+        (see display_radius and FREEZE_LOOK). `hole_pos` maps hole keys to positions;
+        `sizes(metas)` gives the radii the bodies are drawn with (default: meta["drawn"])."""
+        metas, out_pos, out_g = [], [], []
+        for key, close in self.holes.items():
+            if key not in hole_masses or not close.meta:
+                continue
+            r_g = self.G * hole_masses[key] / self.c**2
             s = close.system
             r = np.linalg.norm(s.x, axis=1)
-            g = (1.0 - 2.0 / r) / np.maximum(energy(s.x, s.w), 1e-12) / np.array(close.g0)
-            g = np.clip(g, 0.0, 1.0)
-            for k, meta in enumerate(close.meta):
-                out_pos.append(centre + (r[k] - 1.0) * r_g * s.x[k] / r[k])
-                # Redshift: blue and green go first, and the whole dims.
-                out_col.append(
-                    np.array(meta["color"]) * np.array([1.0, g[k], g[k] ** 2]) * g[k] ** 2
-                )
-                out_rad.append(meta["drawn"])
-                out_kind.append(2.0 if meta["gas"] else 0.0)
-        if not out_pos:
+            metas.extend(close.meta)
+            size = (
+                np.array([m["drawn"] for m in close.meta], dtype=float)
+                if sizes is None
+                else sizes(close.meta)
+            )
+            out_pos.append(hole_pos[key] + (display_radius(r, size / r_g) * r_g / r)[:, None] * s.x)
+            out_g.append(close.look())
+        if not metas:
             return None
-        return np.array(out_pos), np.array(out_col), np.array(out_rad), np.array(out_kind)
+        return metas, np.concatenate(out_pos), np.concatenate(out_g)

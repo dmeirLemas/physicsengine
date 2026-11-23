@@ -23,20 +23,35 @@ Units G = c = M = 1. Reference values and their sources:
 - Plummer sphere in equilibrium: 2K / |W| = 1; half-mass radius 1.305 a
   (cut at 5 a: 1.25 a). Tidal disruption: about half the debris is bound
   (Rees 1988, Nature 333, 523).
+- Tidal radius r_t = R (M / m)^(1/3) (Hills 1975, Nature 254, 295; Rees
+  1988), with R_sun = 6.957e5 km, G M_sun / c^2 = 1.4766 km; white dwarf of
+  0.6 M_sun and 8800 km. The star scenes' layout (start radius, orbit) is
+  the module's own choice; the tests hold it to: whole at the start, released
+  at r_t, swallowed whole when r_t is inside the horizon.
 """
 
 import numpy as np
 import pytest
 
-from physengine.modules import kerr
+from physengine.modules import kerr, scenario_files
+from physengine.modules.blackhole_editor import added_bodies, forget_added, remember
 from physengine.modules.blackhole_images import RayTable, body_images
 from physengine.modules.blackhole_scenes import (
+    R_CAPTURE,
+    STAR_SCENES,
+    STARS,
+    orbiting,
     plummer_star,
+    scene_options,
     star_in_hole_units,
+    star_on_orbit,
+    star_orbit,
+    star_scene,
     tidal_radius,
 )
 from physengine.modules.blackhole_sph import Gas, plummer_energy
-from physengine.modules.blackhole_star import SWALLOWED, TORN
+from physengine.modules.blackhole_star import INTACT, SWALLOWED, TORN, IntactStar
+from physengine.modules.blackholemodule import DEFAULT_SCENE, BlackHoleModule, read_scenario
 from physengine.modules.geodesics import (
     BodySystem,
     History,
@@ -375,16 +390,29 @@ def test_plummer_star_equilibrium():
     assert ratio == pytest.approx(1.0, abs=0.06)
 
 
-def _star_run(scene, log_mass, star, until, cooling="Fast"):
-    from physengine.modules.blackholemodule import BlackHoleModule
-
+def _module(scene, log_mass, star, speed=40.0, cooling="Fast"):
     m = BlackHoleModule()
     m.scene_name, m.hole_mass_log, m.star, m.gas_cooling = scene, log_mass, star, cooling
-    m.speed = 100.0
+    m.speed = speed
     m.load()
+    return m
+
+
+def _star_run(scene, log_mass, star, until, cooling="Fast"):
+    m = _module(scene, log_mass, star, speed=100.0, cooling=cooling)
     while m.bodies.t < until:
         m.step(m.dt)
     return m
+
+
+def _reference_tidal_radius(star, log_mass):
+    """r_t = R (M / m)^(1/3) in units of G M / c^2, from the constants in the header."""
+    m_sun, radius_km = {"Sun-like": (1.0, 6.957e5), "White dwarf": (0.6, 8.8e3)}[star]
+    hole = 10.0**log_mass
+    return radius_km / (1.4766 * hole) * (hole / m_sun) ** (1.0 / 3.0)
+
+
+SLIDER_MASSES = (4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0)  # log10, the slider's range
 
 
 def test_tidal_radius_of_the_sun():
@@ -397,20 +425,155 @@ def test_tidal_radius_of_the_sun():
     assert tidal_radius(radius, m) == pytest.approx(2.0, rel=1e-2)
 
 
+@pytest.mark.parametrize("scene", STAR_SCENES)
+@pytest.mark.parametrize("star", tuple(STARS))
+def test_star_starts_whole_outside_its_tidal_radius_at_every_mass(scene, star):
+    # For every hole mass on the slider (1e4 to 1e9 solar masses) and both
+    # stars: the star's centre starts outside r_t = R (M / m)^(1/3) (so the
+    # tide has not yet beaten its gravity: it must be one body), at least 20
+    # of its own radii from the hole (r_t / R = (M / m)^(1/3) >= 21.5 for the
+    # Sun at 1e4), with every particle outside the horizon, and moving
+    # inward. Whether it will be torn is r_t against the horizon (plunging
+    # orbit) or against the orbit's pericentre (bound orbit).
+    for log_mass in SLIDER_MASSES:
+        r_t = _reference_tidal_radius(star, log_mass)
+        specs, info = star_scene(scene, 10.0**log_mass, star)
+        orbit = star_orbit(scene, 10.0**log_mass, star)
+        assert info.tidal_radius == pytest.approx(r_t, rel=1e-3)
+        r0 = np.linalg.norm(info.x)
+        assert r0 == pytest.approx(orbit.r0)
+        assert r0 > 1.25 * r_t
+        assert r0 > 20.0 * info.radius
+        assert min(np.linalg.norm(s.x) for s in specs) > 2.5
+        assert info.x @ info.w <= 1e-9 * r0  # inbound (or at the apocentre)
+        if orbit.kind == "bound":
+            # Deep enough to be torn completely (r_t / r_p >= 1.5), and the
+            # pericentre outside the hole's reach.
+            assert orbit.torn and r_t / orbit.pericentre >= 1.5 and orbit.pericentre >= 6.0
+        else:
+            assert orbit.torn == (r_t > R_CAPTURE)
+        assert ("swallows" in scene_options(scene, 10.0**log_mass, star).info) == (not orbit.torn)
+
+
+@pytest.mark.parametrize(
+    "scene, log_mass, star, speed",
+    [
+        ("Star torn apart", 5.5, "Sun-like", 40.0),  # r_t = 101.5 M, the default scene
+        ("Star torn apart", 7.0, "Sun-like", 40.0),  # r_t = 10.15 M
+        ("Star torn apart", 7.0, "Sun-like", 400.0),  # the same at the fastest Speed setting
+        ("Star torn apart", 4.0, "White dwarf", 40.0),  # r_t = 15.2 M
+        ("Star torn apart, with gas", 5.5, "Sun-like", 40.0),  # bound orbit, 16.9 to 135 M
+    ],
+)
+def test_star_is_one_body_until_it_is_released_at_its_tidal_radius(scene, log_mass, star, speed):
+    # Until the centre crosses r_t the star is intact: its particles carry
+    # no mass (no pulls, no pressure) and sit at fixed offsets from the centre.
+    # The release happens within 2% of r_t = R (M / m)^(1/3) (measured: 0.998
+    # to 1.000 r_t, also at Speed 400, where one frame is 8 M long), and after
+    # about 4 s of wall time at the default Speed (the scene's clock is set
+    # for that: 240 frames; up to 290 where r_t < 15 M and the clock has slowed).
+    r_t = _reference_tidal_radius(star, log_mass)
+    m = _module(scene, log_mass, star, speed=speed)
+    star_ = m.intact_star
+    frames = 0
+    while star_.state == INTACT:
+        assert not m.bodies.mass.any()
+        offsets = m.bodies.x[star_.idx] - star_.centre.x[0]
+        assert np.abs(offsets - star_.info.dx).max() < 1e-9 * max(r_t, 1.0)
+        assert star_.centre.r()[0] >= r_t
+        m.step(m.dt)
+        frames += 1
+        assert frames < 2000
+    assert star_.state == TORN
+    assert star_.released_r == pytest.approx(r_t, rel=0.02)
+    assert star_.released_r < r_t
+    assert m.bodies.mass[star_.idx].sum() == pytest.approx(star_.info.mass)
+    if speed == 40.0:
+        assert 3.5 < frames / 60.0 < 5.0
+
+
 def test_star_is_torn_or_swallowed_whole_depending_on_the_masses():
-    # A bound orbit with L = 3.8, just under the capture limit. The Sun at
-    # the default 3.2e5 solar-mass hole (radius 1.5 M, r_t = 102 M) is torn
-    # into a strand; measured, 78% is swallowed by t = 300 M and 81% by
-    # 450 M, the rest stays in orbit. A white dwarf at 1e6 solar masses
-    # (r_t = 0.7 M, inside the horizon) goes in whole, and so does the Sun at
-    # 3e8 solar masses (above the Hills mass).
-    torn = _star_run("Star torn apart", 5.5, "Sun-like", 600.0)
+    # A bound orbit with L = 3.8, just under the capture limit, so the
+    # star's centre goes into the hole. The Sun at the default 3.2e5
+    # solar-mass hole (radius 1.5 M, r_t = 102 M) is released at 102 M and
+    # drawn into a strand; measured, 97% is swallowed by t = 1600 M and 2.5%
+    # is thrown out unbound. The Sun at 1e8 solar masses (r_t = 2.19 M, just
+    # outside the horizon: the Hills mass is 1.1e8) is still torn, all of it
+    # swallowed. A white dwarf at 1e6 (r_t = 0.7 M) and the Sun at 1.6e8 and
+    # 1e9 (r_t = 1.6 and 0.5 M), with r_t inside the horizon, go in whole:
+    # never released.
+    torn = _star_run("Star torn apart", 5.5, "Sun-like", 2000.0)
     assert torn.intact_star.state == TORN
-    assert 0.7 < np.mean(~torn.bodies.alive) < 0.9
-    for log_mass, star in ((6.0, "White dwarf"), (8.5, "Sun-like")):
+    assert 0.9 < np.mean(~torn.bodies.alive) < 0.995
+    edge = _star_run("Star torn apart", 8.0, "Sun-like", 400.0)
+    assert edge.intact_star.state == TORN
+    assert edge.intact_star.released_r == pytest.approx(2.187, rel=0.02)
+    assert not edge.bodies.alive.any()
+    for log_mass, star in ((6.0, "White dwarf"), (8.2, "Sun-like"), (9.0, "Sun-like")):
         whole = _star_run("Star torn apart", log_mass, star, 400.0)
         assert whole.intact_star.state == SWALLOWED
+        assert whole.intact_star.released_r is None
         assert not whole.bodies.alive.any()
+        assert not whole.bodies.mass.any()  # never became separate particles
+
+
+def test_gas_scene_tears_the_star_or_says_why_not():
+    # "Star torn apart, with gas": where a bound orbit can go deep enough
+    # inside r_t (r_t >= 1.5 x 7 M: the Sun up to 1e6.9 solar masses) the
+    # star is on one, with its pericentre at r_t / 6 or 7 M; above that it
+    # is sent in on the plunging orbit and the scene's text says so. Either
+    # way it does not orbit whole for ever: its path crosses r_t, or ends in
+    # the hole.
+    for log_mass in SLIDER_MASSES:
+        r_t = _reference_tidal_radius("Sun-like", log_mass)
+        orbit = star_orbit("Star torn apart, with gas", 10.0**log_mass, "Sun-like")
+        info = scene_options("Star torn apart, with gas", 10.0**log_mass, "Sun-like").info
+        if r_t >= 10.5:
+            assert orbit.kind == "bound"
+            assert orbit.pericentre == pytest.approx(max(r_t / 6.0, 7.0), rel=1e-3)
+            assert orbit.pericentre < r_t < orbit.r0
+            assert "comes back" in info
+        else:
+            assert orbit.kind == "plunge"
+            assert ("only torn on its way" in info) or ("swallows" in info)
+
+
+def test_released_star_is_supported_once():
+    # What holds a released star up: pressure (gas, particles at rest in the
+    # star) or random motions (no gas), never both. A star of gas released
+    # far from the hole (r = 20000 M, tide negligible) must keep its size:
+    # measured, its half-mass radius goes from 0.732 to 0.70 M in 4 dynamical
+    # times sqrt(a^3 / m) (and 0.68 in 6); with the Plummer velocities added
+    # on top of the pressure, as the module did before, it swelled to 1.6 M
+    # in 6. The collisionless star stays at 0.73 to 0.77 M.
+    mass, radius = star_in_hole_units("Sun-like", 10.0**5.5)
+    t_dyn = np.sqrt((radius / 2.5) ** 3 / mass)
+    for gas in (True, False):
+        specs, info = star_on_orbit("S", 2000, mass, radius, r0=20000.0, L=141.4, E=1.0, gas=gas)
+        info.tidal_radius = 1e9  # released at once
+        b = BodySystem(
+            np.array([s.x for s in specs]),
+            np.array([s.w for s in specs]),
+            mass=np.zeros(2000),
+            eps=0.1 * radius / 2.5,
+        )
+        b.OUTER_STEP = 0.01 * t_dyn
+        if gas:
+            b.hydro = Gas(2000)
+        star = IntactStar(info, b)
+        b.advance(1.0)
+        star.update(b, 1.0)
+        assert star.state == TORN
+        inner = b.w - np.median(b.w, axis=0)  # velocities in the star
+        if gas:
+            assert np.abs(inner).max() < 1e-3 * np.sqrt(mass / radius)
+        else:
+            assert np.sqrt(np.mean(inner**2)) > 0.1 * np.sqrt(mass / radius)
+        start = np.median(np.linalg.norm(info.dx, axis=1))
+        for _ in range(4):
+            b.advance(t_dyn)
+        size = np.median(np.linalg.norm(b.x - np.median(b.x, axis=0), axis=1))
+        assert size == pytest.approx(start, rel=0.1)
 
 
 def test_gas_star_stays_in_hydrostatic_balance():
@@ -418,15 +581,17 @@ def test_gas_star_stays_in_hydrostatic_balance():
     # u = m / (4 sqrt(r^2 + a^2)) (gamma = 5/3) is in balance, so its
     # half-mass radius must stay put (measured: within 6% over 10 dynamical
     # times sqrt(a^3 / m), energy to 0.4%); without pressure it falls to
-    # less than half within 2.5.
+    # less than half within 2.5. Gas that also has the Plummer sphere's
+    # velocity dispersion (which alone balances gravity, 2K = |W|) is
+    # supported twice and swells: measured, 1.7 times the radius after 4.
     n, a = 2000, 1.0
-    x0, _ = plummer_star(n, 1.0, a, np.random.default_rng(1))
+    x0, v0 = plummer_star(n, 1.0, a, np.random.default_rng(1))
     mass = np.full(n, 1.0 / n)
     alive = np.ones(n, bool)
     eps, dt = 0.1, 0.01
 
-    def half_mass_radius(with_gas, t_end):
-        x, v = x0.copy(), np.zeros_like(x0)
+    def half_mass_radius(with_gas, t_end, moving=False):
+        x, v = x0.copy(), (v0.copy() if moving else np.zeros_like(x0))
         gas = Gas(n)
         gas.start(np.arange(n), plummer_energy(x, 1.0, a), 2.5 * a / np.cbrt(n))
         grav = np.zeros_like(x)
@@ -457,20 +622,149 @@ def test_gas_star_stays_in_hydrostatic_balance():
     assert r_gas == pytest.approx(r0, rel=0.1)
     assert drift < 0.01
     assert half_mass_radius(False, 2.5)[0] < 0.6 * r0
+    assert half_mass_radius(True, 4.0, moving=True)[0] > 1.3 * r0
 
 
 def test_gas_debris_is_torn_heated_and_partly_eaten():
-    # The Sun on the eccentric orbit (pericentre 8 M) at 1e6 solar masses:
-    # released at once (r_t = 47 M > apocentre), stretched at the first
-    # passage (t ~ 340 M), shocked from the second (t ~ 1000 M) on. Measured
-    # with fast cooling: 2% eaten by t = 2000 M, 7% by 3000 M, and the gas a
-    # thousand times hotter than the star was.
-    m = _star_run("Star torn apart, with gas", 6.0, "Sun-like", 3000.0)
+    # The Sun at 1e6 solar masses (r_t = 47.1 M) on the scene's eccentric
+    # orbit, 7.85 to 62.8 M (period 1320 M): whole until it crosses r_t, then
+    # stretched at the first passage (t ~ 700 M) and shocked when the stream
+    # meets itself, from the second passage on. Measured with fast cooling:
+    # nothing eaten by t = 2000 M, 1.5% by 3000 M, 4.3% by 4000 M, 8% by
+    # 5000 M; at t = 4000 M the hottest quarter of the gas is over a thousand
+    # times hotter than the star was (median 190 times).
+    m = _star_run("Star torn apart, with gas", 6.0, "Sun-like", 4000.0)
     b = m.bodies
     assert m.intact_star.state == TORN
-    assert 0.03 < np.mean(~b.alive) < 0.15
+    assert m.intact_star.released_r == pytest.approx(47.1, rel=0.02)
+    assert 0.01 < np.mean(~b.alive) < 0.15
     u_star = np.median(plummer_energy(m.intact_star.info.dx, 1e-6, 0.471 / 2.5))
-    assert np.median(m.gas.u[b.alive]) > 100.0 * u_star
+    assert np.percentile(m.gas.u[b.alive], 75) > 100.0 * u_star
+
+
+# ------------------------------------------------------ saved scenarios
+
+
+def _saved(**changes):
+    """A valid saved scenario (as BlackHoleModule.scenario() writes it), with `changes`."""
+    spec = orbiting("Probe", 9.0, 22.0, inclination_deg=15.0, temperature=8000.0)
+    data = {
+        "scene_name": "Custom",
+        "spin": 0.6,
+        "hole_mass_log": 7.0,
+        "star": "White dwarf",
+        "bodies": [
+            {
+                "name": "Probe",
+                "x": list(spec.x),
+                "w": list(spec.w),
+                "radius": 0.5,
+                "temperature": 8000.0,
+                "mass": 0.0,
+            }
+        ],
+    }
+    data.update(changes)
+    return data
+
+
+def _body(**changes):
+    body = dict(_saved()["bodies"][0])
+    body.update(changes)
+    return [body]
+
+
+MALFORMED = [
+    None,
+    [],
+    "Custom",
+    {},
+    {"bodies": [], "gravity": "Newton"},  # a scenario of the N-body module
+    _saved(scene_name="No such scene"),
+    _saved(scene_name=None),
+    _saved(scene_name=["Custom"]),
+    _saved(spin="fast"),
+    _saved(spin=None),
+    _saved(spin=1.5),
+    _saved(spin=float("nan")),
+    _saved(hole_mass_log=None),
+    _saved(hole_mass_log=12.0),
+    _saved(hole_mass_log=True),
+    _saved(star=5),
+    _saved(star="Red giant"),
+    _saved(bodies=None),
+    _saved(bodies={"name": "Probe"}),
+    _saved(bodies=[None]),
+    _saved(bodies=[{"name": "no state"}]),
+    _saved(bodies=_body(x=[1.0, 2.0])),
+    _saved(bodies=_body(x=[30.0, None, 0.0])),
+    _saved(bodies=_body(x="far away")),
+    _saved(bodies=_body(w=[0.0, float("inf"), 0.0])),
+    _saved(bodies=_body(x=[1.0, 0.5, 0.0])),  # inside the horizon
+    _saved(bodies=_body(radius="big")),
+    _saved(bodies=_body(temperature=-5.0)),
+    _saved(bodies=_body(mass=None)),
+    _saved(bodies=_body(name=7)),
+]
+
+
+def test_scenario_round_trip_through_the_checks():
+    # Plumbing: what scenario() writes, read_scenario() takes back unchanged.
+    scene_name, spin, hole_mass_log, star, specs = read_scenario(_saved())
+    assert (scene_name, spin, hole_mass_log, star) == ("Custom", 0.6, 7.0, "White dwarf")
+    reference = orbiting("Probe", 9.0, 22.0, inclination_deg=15.0, temperature=8000.0)
+    np.testing.assert_allclose(specs[0].x, reference.x)
+    np.testing.assert_allclose(specs[0].w, reference.w)
+    # Entries a file may leave out take their defaults.
+    assert read_scenario({"scene_name": "Disc only"})[1:] == (0.0, 5.5, "Sun-like", [])
+
+
+@pytest.mark.parametrize("data", MALFORMED)
+def test_malformed_scenario_is_refused_and_changes_nothing(data):
+    # Plumbing: a file of the wrong kind or with wrong types, missing or null
+    # entries is refused with a ValueError (the only error the load button
+    # reports), and the module and its added bodies stay exactly as they were.
+    forget_added()
+    m = BlackHoleModule()
+    m.scene_name, m.spin, m.hole_mass_log, m.star = "Precessing orbit", 0.3, 6.5, "Sun-like"
+    remember("Precessing orbit", orbiting("Mine", 12.0, 30.0))
+    with pytest.raises(ValueError) as error:
+        m.load_scenario(data)
+    assert str(error.value)
+    assert (m.scene_name, m.spin, m.hole_mass_log, m.star) == (
+        "Precessing orbit",
+        0.3,
+        6.5,
+        "Sun-like",
+    )
+    assert [s.name for s in added_bodies("Precessing orbit")] == ["Mine"]
+    assert not m.reset_requested
+    forget_added()
+
+
+def test_setup_survives_a_malformed_scenario_from_the_home_screen():
+    # Plumbing: setup() must not raise (the app has no handler there). A bad
+    # scenario left by the home screen gives the default scene and a message;
+    # a good one is opened.
+    forget_added()
+    try:
+        m = BlackHoleModule()
+        m.renderer.setup = lambda ctx: None  # no GL context in the tests
+        scenario_files.request("blackhole", _saved(bodies=_body(x=[1.0, None, 0.0])))
+        m.setup(None)
+        assert m.scene_name == DEFAULT_SCENE
+        assert m.bodies.n == 1 and "Could not open" in m.notice
+        assert added_bodies(DEFAULT_SCENE) == []
+
+        good = BlackHoleModule()
+        good.renderer.setup = lambda ctx: None
+        scenario_files.request("blackhole", _saved())
+        good.setup(None)
+        assert (good.scene_name, good.spin, good.notice) == ("Custom", 0.6, "")
+        assert good.bodies.n == 1
+    finally:
+        scenario_files.take_request("blackhole")
+        forget_added()
 
 
 def test_gas_ring_drains_slowly_and_is_not_flung_out():
@@ -480,8 +774,6 @@ def test_gas_ring_drains_slowly_and_is_not_flung_out():
     # gas spreads. Measured at viscosity 1: 4.3% eaten by t = 1000 M, the
     # outermost particle at 27 M (nothing thrown out), median radius 13 M.
     # At viscosity 0.2 a third as much drains (2.4% against 7.3% by 1500 M).
-    from physengine.modules.blackholemodule import BlackHoleModule
-
     def run(viscosity):
         m = BlackHoleModule()
         m.scene_name = "Gas ring"
@@ -499,3 +791,61 @@ def test_gas_ring_drains_slowly_and_is_not_flung_out():
     assert r.max() < 45.0
     assert 12.2 < np.median(r) < 14.5
     assert np.mean(~run(0.2).alive) < 0.6 * eaten
+
+
+def test_sph_tree_finds_the_same_sums_as_the_direct_double_loop():
+    """density_tree / forces_tree (what Gas uses) against density / forces, which test every pair.
+
+    Reference: the direct sums themselves (the definition of the SPH sums,
+    blackhole_sph module text); the tree only decides which pairs to look
+    at, so the two agree to rounding (1e-12 relative). The gas mixes a
+    dense clump, a thin halo with large smoothing lengths and bodies that
+    are not gas, so that both the shared leaf searches and the searches of
+    their own (h larger than the leaf's reach) are used.
+    """
+    from physengine.modules import blackhole_sph as sph
+
+    rng = np.random.default_rng(7)
+    n = 900
+    x = np.concatenate([rng.normal(size=(600, 3)) * 0.5, rng.normal(size=(300, 3)) * 6.0])
+    v = rng.normal(size=(n, 3)) * 0.1
+    m = np.full(n, 1.0 / n)
+    u = rng.uniform(0.5, 1.5, n) * 1e-3
+    h = np.where(np.arange(n) < 600, 0.15, 2.5) * rng.uniform(0.7, 1.3, n)
+    gas = rng.random(n) > 0.1
+    members = np.flatnonzero(gas)
+    order, *boxes = sph.build_tree(np.ascontiguousarray(x), members)
+    assert np.array_equal(np.sort(order), members)
+    xs, vs, ms, us = x[order], v[order], m[order], u[order]
+    hs = h[order].copy()
+    rho_t, shock_t = np.empty(len(order)), np.empty(len(order))
+    sph.density_tree(*boxes, xs, vs, ms, hs, us, 8.0, 0, rho_t, shock_t)  # 0 passes: h as given
+    assert np.array_equal(hs, h[order])
+    rho, shock = np.empty(n), np.empty(n)
+    sph.density(x, v, m, h, u, gas, rho, shock)
+    assert np.allclose(rho_t, rho[order], rtol=1e-12, atol=0)
+    assert np.allclose(shock_t, shock[order], rtol=1e-12, atol=1e-15)
+
+    links = boxes[2:]
+    acc_t, dudt_t, dt_t = np.empty((len(order), 3)), np.empty(len(order)), np.empty(len(order))
+    sph.forces_tree(
+        *sph.sphere_boxes(*links, xs, hs), *links, xs, vs, ms, hs, rho_t, us, shock_t,
+        1.0, 2.0, acc_t, dudt_t, dt_t,
+    )  # fmt: skip
+    acc, dudt, dt_i = np.empty((n, 3)), np.empty(n), np.empty(n)
+    sph.forces(x, v, m, h, rho, u, gas, shock, 1.0, 2.0, acc, dudt, dt_i)
+    scale = np.abs(acc[gas]).max()
+    assert np.abs(acc_t - acc[order]).max() < 1e-12 * scale
+    assert np.abs(dudt_t - dudt[order]).max() < 1e-12 * np.abs(dudt[gas]).max()
+    assert np.allclose(dt_t, dt_i[order], rtol=1e-12, atol=0)
+
+    # h iterated from a start far too small: it doubles in each pass, past
+    # the reach of the shared search, so the particles' own searches run.
+    hs = h[order] / 4.0
+    sph.density_tree(*boxes, xs, vs, ms, hs, us, 8.0, 3, rho_t, shock_t)
+    assert np.mean(hs > 3.0 * h[order] / 4.0) > 0.5  # well past 1.1 x the leaf's largest start
+    h_new = h.copy()
+    h_new[order] = hs
+    sph.density(x, v, m, h_new, u, gas, rho, shock)
+    assert np.allclose(rho_t, rho[order], rtol=1e-12, atol=0)
+    assert np.allclose(shock_t, shock[order], rtol=1e-12, atol=1e-15)

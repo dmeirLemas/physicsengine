@@ -2,6 +2,11 @@
 
 Keeps a ring buffer of past body positions (one sample per physics step) and
 draws the most recent part of it as one fading line per body.
+
+A body that leaves the list of bodies (swallowed, torn, merged, or handed to
+its exact orbit round a hole) leaves its trail behind: it is kept as it was
+(`left`) and goes on fading from its old end like any trail, until it has
+run out. Before, it vanished at that instant.
 """
 
 import moderngl
@@ -31,6 +36,9 @@ void main() {
 """
 
 
+MAX_LEFT = 64  # trails kept of bodies that are gone
+
+
 class TrailRenderer:
     def __init__(self, n_bodies, capacity):
         self.capacity = max(int(capacity), 1)
@@ -41,6 +49,11 @@ class TrailRenderer:
         self.count = 0  # samples stored so far, at most capacity
         # Samples stored since each body exists. Bodies added later have fewer.
         self.valid = np.zeros(n_bodies, dtype=int)
+        self.total = 0  # samples recorded since the start
+        # Trails of bodies that are gone: dicts with "history" (the body's
+        # column of the ring buffer when it left), "valid", "end" (the value
+        # of `total` then), "color" and "key".
+        self.left = []
 
         self.program = None
         self.buffer = None
@@ -55,16 +68,43 @@ class TrailRenderer:
         self.head = (self.head + 1) % self.capacity
         self.count = min(self.count + 1, self.capacity)
         self.valid = np.minimum(self.valid + 1, self.capacity)
+        self.total += 1
+        if self.left:
+            # A trail left behind is over when all of it has scrolled out.
+            self.left = [t for t in self.left if self.total - t["end"] < t["valid"]]
 
     def add_bodies(self, k):
         """Make room for k more bodies, which start with no trail."""
         self.history = np.concatenate([self.history, np.zeros((self.capacity, k, 3))], axis=1)
         self.valid = np.concatenate([self.valid, np.zeros(k, dtype=int)])
 
-    def remove_body(self, i):
-        """Drop body i's trail."""
-        self.history = np.delete(self.history, i, axis=1)
-        self.valid = np.delete(self.valid, i)
+    def remove_body(self, i, color=None, key=None):
+        """Body i is gone. With `color` its trail stays behind, drawn in that colour
+        until it has faded out (`key`: a name for it, see drop_left)."""
+        self.remove_bodies([i], None if color is None else [color], [key])
+
+    def remove_bodies(self, rows, colors=None, keys=None):
+        """remove_body for several bodies at once (the arrays are rebuilt once)."""
+        rows = [int(i) for i in rows]
+        if colors is not None:
+            for k, i in enumerate(rows):
+                if self.valid[i] >= 2:
+                    self.left.append(
+                        {
+                            "history": self.history[:, i].copy(),
+                            "valid": int(self.valid[i]),
+                            "end": self.total,
+                            "color": tuple(colors[k]),
+                            "key": None if keys is None else keys[k],
+                        }
+                    )
+            del self.left[:-MAX_LEFT]
+        self.history = np.delete(self.history, rows, axis=1)
+        self.valid = np.delete(self.valid, rows)
+
+    def drop_left(self, key):
+        """Forget the trail left behind under `key` (the body is back, with its trail)."""
+        self.left = [t for t in self.left if t["key"] != key]
 
     def forget(self, i):
         """Clear body i's trail, for example after it was moved by hand."""
@@ -80,11 +120,11 @@ class TrailRenderer:
         followed point has moved since.
         """
         n_bodies = len(pos)
-        if n_bodies == 0:
+        if n_bodies == 0 and not self.left:
             return
 
         n = min(int(n_points), self.count)
-        if follow == "com":
+        if follow == "com" and n_bodies:
             # The centre of mass needs every body's past position.
             n = min(n, int(self.valid.min()))
         elif follow is not None:
@@ -95,11 +135,17 @@ class TrailRenderer:
         # The n most recent samples, oldest first, then the current positions.
         idx = (self.head - n + np.arange(n)) % self.capacity
         points = np.concatenate([self.history[idx], pos[None]], axis=0)  # (n + 1, N, 3)
+        # The trails left behind, as further columns. Theirs end `age` samples
+        # ago: only the rows before that are theirs (and drawn).
+        left = [t for t in self.left if self.total - t["end"] < n]
+        if left:
+            gone = np.stack([t["history"][idx] for t in left], axis=1)  # (n, K, 3)
+            points = np.concatenate([points, np.concatenate([gone, gone[-1:]], axis=0)], axis=1)
 
-        if follow == "com":
+        if follow == "com" and n_bodies:
             total = mass.sum()
             if total > 0.0:
-                com = np.einsum("n,knd->kd", mass, points) / total  # (n + 1, 3)
+                com = np.einsum("n,knd->kd", mass, points[:, :n_bodies]) / total  # (n + 1, 3)
                 points = points - com[:, None] + com[-1]
         elif follow is not None:
             points = points - points[:, [follow]] + pos[follow]
@@ -112,7 +158,7 @@ class TrailRenderer:
 
         # One contiguous run of vertices per body: (N, n + 1, 4). Positions are
         # made relative to the camera target in float64 before the float32 cast.
-        data = np.empty((n_bodies, n_verts, 4), dtype="f4")
+        data = np.empty((points.shape[1], n_verts, 4), dtype="f4")
         data[:, :, :3] = np.swapaxes(points - camera.target, 0, 1)
         data[:, :, 3] = alpha
         raw = data.tobytes()
@@ -145,6 +191,17 @@ class TrailRenderer:
                 mode=moderngl.LINE_STRIP,
                 vertices=n_body,
                 first=i * n_verts + (n_verts - n_body),
+            )
+        for k, trail in enumerate(left):
+            last = n - (self.total - trail["end"])  # rows [first, last) are its samples
+            first = max(last - trail["valid"], 0)
+            if last - first < 2:
+                continue
+            self.program["color"].value = trail["color"]
+            self.vao.render(
+                mode=moderngl.LINE_STRIP,
+                vertices=last - first,
+                first=(n_bodies + k) * n_verts + first,
             )
 
     def release(self):

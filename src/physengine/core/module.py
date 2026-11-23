@@ -7,6 +7,9 @@ class BaseModule(ABC):
     # A module sets this to True to ask the app to rebuild it on the next
     # frame, keeping its spec values (the same as the Reset button).
     reset_requested = False
+    # A module sets this to the registry name of another module to ask the
+    # app to switch to it on the next frame (the home screen's buttons).
+    switch_requested = None
 
     @abstractmethod
     def setup(self, ctx): ...

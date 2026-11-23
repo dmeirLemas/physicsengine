@@ -10,6 +10,7 @@ from copy import deepcopy
 import numpy as np
 from imgui_bundle import imgui
 
+from physengine.modules import scenario_files
 from physengine.modules.blackhole_scenes import at_rest, orbiting
 
 WINDOW_MARGIN = 10.0
@@ -36,6 +37,12 @@ def remember(scene_name, spec):
 def forget_added():
     global _added
     _added = None
+
+
+def set_added(scene_name, specs):
+    """Replace the added bodies of `scene_name` (loading a saved scenario)."""
+    global _added
+    _added = (scene_name, deepcopy(list(specs)))
 
 
 # ----------------------------------------------------------------- window
@@ -67,14 +74,21 @@ class BodiesWindow:
             imgui.end()
             return
 
+        if m.notice:
+            imgui.text_colored((1.0, 0.6, 0.3, 1.0), m.notice)
+        scenario_files.draw("blackhole", m.scenario, m.load_scenario)
         bodies = m.bodies
         r = bodies.r()
         if bodies.n == 0:
             imgui.text_disabled("No bodies")
         if bodies.n > 20:  # a star of particles: a summary, not a list
             imgui.text(f"{bodies.n} particles, {int((~bodies.alive).sum())} fallen in")
+            if m.intact_star is not None:
+                imgui.text(f"Star: {m.intact_star.state}")
             if m.options.info:
                 imgui.text_disabled(m.options.info)
+            for line in m.star_notes():
+                imgui.text_disabled(line)
         for i in range(bodies.n if bodies.n <= 20 else 0):
             if bodies.alive[i]:
                 imgui.text(f"{m.names[i]}: r = {r[i]:.2f} M")

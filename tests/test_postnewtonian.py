@@ -16,6 +16,7 @@ Reference values and their sources:
 import numpy as np
 import pytest
 
+from physengine.modules.nbody_binary import advance_relative, invariants, mean_motion, peters
 from physengine.modules.nbody_scenes import M_SGR_A
 from physengine.modules.nbodymodule import RELATIVITY, NBodyModule, force_1pn
 from physengine.modules.nbodystate import Integrator, NBodyState, acc
@@ -185,3 +186,143 @@ def test_black_hole_merger_scene():
         steps += 1
     assert steps * m.dt == pytest.approx(18.8, abs=0.5)
     assert m.nb.mass[0] == pytest.approx(1e10 * (1 - 0.048), rel=1e-9)
+
+
+# ------------------------------------------------ the analytic orbit of a pair
+#
+# nbody_binary.advance_relative: the 1PN orbit of a bound pair in closed form
+# (quasi-Keplerian, Damour & Deruelle 1985) with Peters' decay. References:
+# - periapsis advance per radial period: 6 pi G M / (c^2 a (1 - e^2));
+# - the 1PN first integrals of the relative motion (Blanchet 2014, sec. 7.1);
+#   the energy is postnewtonian.eih_energy of the two bodies / reduced mass;
+# - Peters (1964): a circular orbit shrinks as a(t) = a0 (1 - t / T)^(1/4),
+#   T = 5 c^5 a0^4 / (256 G^3 m1 m2 M); for small e, e is proportional to
+#   a^(19/12) (eq. 5.11 to lowest order in e).
+
+
+def _pair_at_apocentre(m1, m2, a, e):
+    total = m1 + m2
+    r = a * (1 + e)
+    v = np.sqrt(G * total * (1 - e) / r)
+    return np.array([r, 0.0, 0.0]), np.array([0.0, v, 0.0])
+
+
+def test_analytic_orbit_keeps_the_1pn_energy_and_is_reversible():
+    m1, m2, c = 1.0, 0.5, 100.0  # G M / (a c^2) = 6e-3
+    total, mu = m1 + m2, m1 * m2 / (m1 + m2)
+    x0, v0 = _pair_at_apocentre(m1, m2, 1.0, 0.3)
+    eps0, h0, _, _ = invariants(x0, v0, G * total, mu / total, c**-2)
+    # eps is the code's own 1PN energy of the two bodies at rest as a whole.
+    pos = np.array([m2 / total * x0, -m1 / total * x0])
+    vel = np.array([m2 / total * v0, -m1 / total * v0])
+    assert mu * eps0 == pytest.approx(eih_energy(pos, vel, np.array([m1, m2]), G, c), rel=1e-13)
+    x, v, code = advance_relative(x0, v0, m1, m2, G, c**-2, 5.3, 0.0, False)
+    assert code == 1
+    eps, h, _, _ = invariants(x, v, G * total, mu / total, c**-2)
+    assert eps == pytest.approx(eps0, rel=1e-13) and h == pytest.approx(h0, rel=1e-13)
+    # Back by the same time: the same state. And in 1000 steps: the same.
+    xb, vb, _ = advance_relative(x, v, m1, m2, G, c**-2, -5.3, 0.0, False)
+    # (At a turning point the radial speed is the root of a rounding error:
+    # 1e-7 of the speed.)
+    np.testing.assert_allclose(xb, x0, atol=1e-12)
+    np.testing.assert_allclose(vb, v0, atol=1e-6)
+    xs, vs = x0, v0
+    for _ in range(1000):
+        xs, vs, _ = advance_relative(xs, vs, m1, m2, G, c**-2, 5.3e-3, 0.0, False)
+    np.testing.assert_allclose(xs, x, atol=1e-9)
+
+
+def test_analytic_orbit_is_keplers_without_relativity():
+    # 1 / c^2 = 0: after one period 2 pi sqrt(a^3 / (G M)) the pair is back;
+    # after half of it, at the periapsis a (1 - e) on the other side.
+    m1, m2, a, e = 1.0, 0.25, 1.3, 0.6
+    x0, v0 = _pair_at_apocentre(m1, m2, a, e)
+    period = 2 * np.pi * np.sqrt(a**3 / (G * (m1 + m2)))
+    x, v, _ = advance_relative(x0, v0, m1, m2, G, 0.0, period, 0.0, False)
+    np.testing.assert_allclose(x, x0, atol=1e-7)
+    np.testing.assert_allclose(v, v0, atol=1e-6)
+    x, v, _ = advance_relative(x0, v0, m1, m2, G, 0.0, 0.5 * period, 0.0, False)
+    np.testing.assert_allclose(x, [-a * (1 - e), 0.0, 0.0], atol=1e-7)
+
+
+def test_analytic_orbit_precesses_at_the_1pn_rate():
+    # One radial period from the apocentre: back at the apocentre, turned by
+    # 6 pi G M / (c^2 a (1 - e^2)). c = 1000 AU/yr: G M / (a c^2) = 4e-5, so
+    # the formula's a and e are the orbit's to that accuracy; within 0.1%.
+    m1, m2, a, e, c = 1.0, 1e-6, 1.0, 0.5, 1000.0
+    total = m1 + m2
+    x0, v0 = _pair_at_apocentre(m1, m2, a, e)
+    eps, h, _, _ = invariants(x0, v0, G * total, m1 * m2 / total**2, c**-2)
+    period = 2 * np.pi / mean_motion(eps, G * total, m1 * m2 / total**2, c**-2)
+    x, v, _ = advance_relative(x0, v0, m1, m2, G, c**-2, period, 0.0, False)
+    assert np.linalg.norm(x) == pytest.approx(np.linalg.norm(x0), rel=1e-9)
+    expected = 6 * np.pi * G * total / (c**2 * a * (1 - e**2))
+    assert np.arctan2(x[1], x[0]) == pytest.approx(expected, rel=1e-3)
+
+    # And against the direct integration of the EIH equations (6000 steps
+    # per orbit) over 6.3 orbits at c = 200 (G M / (a c^2) = 1e-3): the
+    # position angle agrees to 3% of the precession accumulated, 0.156 rad
+    # (measured 1.4%: the 2PN terms the direct integration carries along).
+    c = 200.0
+    s = NBodyState(2)
+    s.pos[:] = [[0, 0, 0], x0]
+    s.vel[:] = [[0, 0, 0], v0]
+    s.mass[:] = [m1, m2]
+    rel0 = s.pos[1] - s.pos[0], s.vel[1] - s.vel[0]
+    eps, h, _, _ = invariants(*rel0, G * total, m1 * m2 / total**2, c**-2)
+    period = 2 * np.pi / mean_motion(eps, G * total, m1 * m2 / total**2, c**-2)
+    integ = Integrator(lambda p, m, vel: eih_acc(p, vel, m, G, c), velocity_dependent=True)
+    steps = int(6.3 * 6000)
+    for _ in range(steps):
+        integ.advance(s, period / 6000)
+    x, v, _ = advance_relative(*rel0, m2, m1, G, c**-2, steps * period / 6000, 0.0, False)
+    direct = s.pos[1] - s.pos[0]
+    precession = 6.3 * 6 * np.pi * G * total / (c**2 * a * (1 - e**2))
+    difference = np.arctan2(x[1], x[0]) - np.arctan2(direct[1], direct[0])
+    assert abs((difference + np.pi) % (2 * np.pi) - np.pi) < 0.03 * precession
+    assert np.linalg.norm(x) == pytest.approx(np.linalg.norm(direct), rel=2e-3)
+
+
+def test_peters_decay():
+    # Circular: a(t) = a0 (1 - t / T)^(1/4). Nearly circular: e ~ a^(19/12).
+    m1, m2, a0, c = 1.0, 0.5, 1.0, 300.0
+    kgw = G**3 * m1 * m2 * (m1 + m2) / c**5
+    T = inspiral_time(m1, m2, a0, G, c)
+    a, e, used, stopped = peters(a0, 0.0, 0.5 * T, kgw, 0.0)
+    assert (e, used, stopped) == (0.0, 0.5 * T, False)
+    assert a == pytest.approx(a0 * 0.5**0.25, rel=1e-6)
+    a, e, used, stopped = peters(a0, 0.01, 0.5 * T, kgw, 0.0)
+    assert e == pytest.approx(0.01 * (a / a0) ** (19 / 12), rel=1e-3)
+    # It stops where the periapsis reaches the given distance: for a
+    # circular orbit after T (1 - (r / a0)^4).
+    a, e, used, stopped = peters(a0, 0.0, 2 * T, kgw, 0.3)
+    assert stopped and a == pytest.approx(0.3, rel=0.03)
+    assert used == pytest.approx(T * (1 - 0.3**4), rel=2e-3)
+
+
+def test_decaying_analytic_orbit_loses_energy_like_the_direct_integration():
+    # The 2.5PN force with the 1PN orbit, integrated directly over 10 orbits
+    # (G M / (a c^2) = 1.5e-3, e = 0.5), against the analytic decay over the
+    # same time: the energy lost agrees within 2% (measured 0.3%; Peters'
+    # rates with the orbit's actual size and shape).
+    m1, m2, a, e, c = 1.0, 0.5, 1.0, 0.5, 200.0
+    total, nu = m1 + m2, m1 * m2 / (m1 + m2) ** 2
+    x0, v0 = _pair_at_apocentre(m1, m2, a, e)
+    eps0, h0, _, _ = invariants(x0, v0, G * total, nu, c**-2)
+    period = 2 * np.pi / mean_motion(eps0, G * total, nu, c**-2)
+    s = NBodyState(2)
+    s.pos[:] = [m2 / total * x0, -m1 / total * x0]
+    s.vel[:] = [m2 / total * v0, -m1 / total * v0]
+    s.mass[:] = [m1, m2]
+    integ = Integrator(
+        lambda p, m, vel: eih_acc(p, vel, m, G, c) + rr_acc(p, vel, m, G, c),
+        velocity_dependent=True,
+    )
+    for _ in range(10 * 3000):
+        integ.advance(s, period / 3000)
+    direct = invariants(s.pos[0] - s.pos[1], s.vel[0] - s.vel[1], G * total, nu, c**-2)[0]
+    x, v, code = advance_relative(x0, v0, m1, m2, G, c**-2, 10 * period, 1e-3, True)
+    analytic = invariants(x, v, G * total, nu, c**-2)[0]
+    assert code == 1
+    assert direct - eps0 < -1e-5 * abs(eps0)
+    assert analytic - eps0 == pytest.approx(direct - eps0, rel=0.02)

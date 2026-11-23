@@ -22,7 +22,18 @@ from copy import deepcopy
 import numpy as np
 from imgui_bundle import imgui
 
-from physengine.modules.nbody_scenes import BLACK_HOLE, Scene, rocky_radius, star_radius
+from physengine.modules import scenario_files
+from physengine.modules.nbody_collisions import is_torn_before_horizon, tidal_radius
+from physengine.modules.nbody_scenes import (
+    BLACK_HOLE,
+    M_EARTH,
+    R_EARTH,
+    R_SUN,
+    Scene,
+    rocky_radius,
+    star_radius,
+)
+from physengine.modules.nbodystate import HANDOVER_RADIUS
 from physengine.modules.postnewtonian import schwarzschild_radius
 
 FOLLOW_NONE = "None"
@@ -61,6 +72,71 @@ def reset_settings():
 
 MASS_STEP = 10.0**0.25  # mass factor per scroll notch while placing
 
+# Starting masses when the kind of a new body is chosen. A black hole starts
+# at a million solar masses: it tears stars and planets apart a few tenths
+# of an AU out, which a planetary view shows. (A stellar-mass hole does it
+# within a hundredth of an AU, below a pixel there.)
+NEW_HOLE_MASS = 1.0e6
+NEW_STAR_MASS = 1.0
+NEW_BODY_MASS = 1.0e-6
+# Below this a body that stops being a black hole is given a rocky body's
+# radius, above it a star's (the hydrogen-burning limit, 0.08 solar masses).
+STAR_MASS_LIMIT = 0.08
+# After a black hole is placed the view is at least this many horizon radii
+# away, so that the hole does not fill the screen.
+HOLE_VIEW_HORIZONS = 12.0
+# Black holes are never drawn smaller than this many pixels: a display minimum
+# (a small hole's horizon is far below a pixel), stated in the window.
+HOLE_MIN_PX = 4.0
+
+
+def body_radius_without_horizon(mass):
+    """Physical radius for a body that stops being a black hole: a main-sequence
+    star's above STAR_MASS_LIMIT, otherwise that of a body of Earth's density."""
+    return star_radius(mass) if mass >= STAR_MASS_LIMIT else rocky_radius(mass)
+
+
+def hole_summary(mass, G, au_per_px=0.0):
+    """What a black hole of this mass does to what comes near it, in words.
+
+    Tidal radii R (M / m)^(1/3) for a star like the Sun and for a body of
+    Earth's density (for which it does not depend on the body's mass);
+    swallowed whole where that is inside the horizon (Hills 1975). With
+    `au_per_px`, says when the tearing is too small to see at this zoom.
+    """
+    horizon = schwarzschild_radius(mass, G)
+    lines = [f"Horizon: {horizon:.3g} AU."]
+    torn = []
+    for what, radius, m in (
+        ("a star like the Sun", R_SUN, 1.0),
+        ("a rocky body", R_EARTH, M_EARTH),
+    ):
+        if is_torn_before_horizon(radius, m, mass, horizon):
+            torn.append((what, tidal_radius(radius, m, mass)))
+    whole = 2 - len(torn)
+    if torn:
+        lines.append(
+            "Tears apart " + " and ".join(f"{what} inside {r_t:.2g} AU" for what, r_t in torn) + "."
+        )
+        largest = max(r_t for _, r_t in torn)
+        if au_per_px > 0.0 and largest < 6.0 * au_per_px:
+            lines.append(
+                f"That is {largest / au_per_px:.1f} px at this zoom: the body will just\n"
+                "vanish into the hole's dot. Zoom in to watch (select the\n"
+                "hole and press Follow)."
+            )
+    if whole == 2:
+        lines.append(
+            "Too massive to tear a star or a planet (the tidal radius is inside\n"
+            "the horizon): they go in whole, freeze on the horizon and fade."
+        )
+    elif whole == 1:
+        lines.append("A rocky body goes in whole, freezes on the horizon and fades.")
+    lines.append(
+        f"Light bodies inside {HANDOVER_RADIUS * horizon:.3g} AU are followed on exact orbits."
+    )
+    return "\n".join(lines)
+
 
 def new_body_radius(kind, mass, G):
     """Physical radius of a placed body: a black hole's horizon, a main-sequence
@@ -93,8 +169,9 @@ HELP = (
 _restart_point = None
 
 
-def save_restart_point(scene_name, state, names, colors, radii, view_distance):
-    """Make `state` (with these names and looks) what Restart of `scene_name` loads."""
+def save_restart_point(scene_name, state, names, colors, radii, view_distance, **extra):
+    """Make `state` (with these names and looks) what Restart of `scene_name` loads.
+    `extra`: the scene's other settings (view_pitch, sheet, info, years_per_second)."""
     global _restart_point
     _restart_point = {
         "scene_name": scene_name,
@@ -103,6 +180,7 @@ def save_restart_point(scene_name, state, names, colors, radii, view_distance):
         "colors": list(colors),
         "radii": list(radii),
         "view_distance": view_distance,
+        "extra": dict(extra),
     }
 
 
@@ -117,6 +195,7 @@ def load_restart_point(scene_name):
         colors=list(p["colors"]),
         radii=list(p["radii"]),
         view_distance=p["view_distance"],
+        **p.get("extra", {}),
     )
 
 
@@ -268,6 +347,7 @@ class SceneEditor:
         self.orbit_source = None  # body waiting for an orbit target to be clicked
         self.press_pos = None  # where a plain left press started, for click detection
         self.placing = None  # body being placed with Ctrl, see _update_placing
+        self.G = 4.0 * np.pi**2  # set by update()
 
     def update(self, camera, G):
         """Draw the window and handle the mouse. Call once per ImGui frame."""
@@ -276,6 +356,7 @@ class SceneEditor:
         if self.selected is not None and self.selected >= self.m.nb.N:
             self.selected = None
 
+        self.G = G
         self._draw_window(W, H, G)
         if camera is None or W <= 0 or H <= 0:
             return
@@ -284,6 +365,28 @@ class SceneEditor:
         self._handle_mouse(camera, G, W, H, draw_list)
         self._draw_selection(camera, W, H, draw_list)
         self._draw_flashes(camera, W, H, draw_list)
+        self._draw_notes(camera, W, H, draw_list)
+
+    def _draw_notes(self, camera, W, H, draw_list):
+        """Notes the module left about events at a hole that could not be seen."""
+        from physengine.modules.nbodymodule import NOTE_SECONDS
+
+        m = self.m
+        now = time.perf_counter()
+        m.notes[:] = [n for n in m.notes if now - n[2] < NOTE_SECONDS and n[0] in m.ids]
+        for k, (hole_id, text, start) in enumerate(m.notes):
+            h = m.index_of(hole_id)
+            x, y, in_front = project(camera, m.nb.pos[h], W, H)
+            if not in_front[0]:
+                continue
+            alpha = min(1.0, 2.0 * (1.0 - (now - start) / NOTE_SECONDS))
+            col = imgui.get_color_u32((1.0, 0.75, 0.4, alpha))
+            draw_list.add_text((x[0] + 14.0, y[0] + 10.0 + 16.0 * k), col, text)
+
+    def _min_px(self):
+        """Smallest drawn radius of each body in pixels (holes have their own)."""
+        m = self.m
+        return np.where(m.nb.black_hole, HOLE_MIN_PX, m.renderer.min_radius_px)
 
     def _draw_flashes(self, camera, W, H, draw_list):
         """Collisions and mergers: a bright burst and an expanding ring (display only)."""
@@ -313,9 +416,7 @@ class SceneEditor:
         x, y, in_front = project(camera, m.nb.pos[i], W, H)
         if not in_front[0]:
             return
-        radius = pixel_radii(camera, m.nb.pos[i], [m.scene.radii[i]], H, m.renderer.min_radius_px)[
-            0
-        ]
+        radius = pixel_radii(camera, m.nb.pos[i], [m.scene.radii[i]], H, m.min_radius_px(i))[0]
         draw_list.add_circle((x[0], y[0]), radius + 4.0, imgui.get_color_u32(rgba), 0, 1.5)
 
     # ------------------------------------------------------------- window
@@ -335,8 +436,12 @@ class SceneEditor:
 
         imgui.text_disabled("Controls (?)")
         imgui.set_item_tooltip(HELP)
+        if m.load_message:
+            imgui.text_colored((1.0, 0.5, 0.4, 1.0), m.load_message)
 
-        follow_options = [FOLLOW_NONE, FOLLOW_COM, *m.scene.names]
+        # (A body on its exact orbit round a hole is not in the list of
+        # bodies for the moment, but can still be followed.)
+        follow_options = [FOLLOW_NONE, FOLLOW_COM, *m.scene.names, *m.away_names()]
         if settings["follow"] not in follow_options:
             settings["follow"] = FOLLOW_NONE
         imgui.set_next_item_width(FIELD_WIDTH)
@@ -356,6 +461,8 @@ class SceneEditor:
             "Look-ahead", settings["lookahead_years"], 0.0, 10.0, "%.1f yr"
         )
         imgui.set_item_tooltip("Predicted path length for the selected or placed body")
+
+        scenario_files.draw("nbody", m.scenario, m.load_scenario)
 
         if imgui.collapsing_header("New body"):
             self._draw_new_body_settings()
@@ -389,26 +496,33 @@ class SceneEditor:
             settings["new_kind"] = kinds[k]
             if kinds[k] == "Black hole":
                 settings["new_color"] = list(BLACK_HOLE)
-                settings["new_mass"] = max(settings["new_mass"], 1.0)
+                settings["new_mass"] = NEW_HOLE_MASS
             if kinds[k] == "Star":
                 settings["new_color"] = [1.0, 0.85, 0.55]
-                settings["new_mass"] = max(settings["new_mass"], 0.1)
+                settings["new_mass"] = NEW_STAR_MASS
+            if kinds[k] == "Body":
+                settings["new_color"] = list(DEFAULT_SETTINGS["new_color"])
+                settings["new_mass"] = NEW_BODY_MASS
         imgui.set_item_tooltip(
             "Body: the size of a rocky body of that mass. Star: the size of a\n"
             "main-sequence star (the Sun: 0.0047 AU), far easier to tear apart.\n"
-            "Black hole: swallows what falls into it (decided on the exact orbit\n"
-            "inside 6 G M / c^2) and tears apart what comes inside its tidal\n"
-            "radius, R (M_hole / m)^(1/3). While you place or select a body,\n"
-            "that radius is drawn round each hole (orange), with the hole's\n"
-            "capture radius (red)."
+            "Black hole: a body that comes inside its tidal radius,\n"
+            "R (M_hole / m)^(1/3), is torn apart into a stream of gas; if that\n"
+            "radius is inside the horizon (a very massive hole) it goes in\n"
+            "whole, freezes on the horizon and fades. While you place or\n"
+            "select a body, the tidal radius is drawn round each hole\n"
+            "(orange), with the hole's capture radius (red)."
         )
-        if settings["new_kind"] == "Black hole":
-            # A stellar-mass hole tears and swallows only at distances far
-            # too small to see in a planetary view; a million solar masses
-            # does it at a fraction of an AU.
-            for label, value in (("10", 10.0), ("1e6", 1.0e6), ("1e9", 1.0e9)):
+        hole = settings["new_kind"] == "Black hole"
+        if hole:
+            for label, value, does in (
+                ("10", 10.0, "stellar: tears apart, but only within 0.01 AU"),
+                ("1e6", 1.0e6, "tears stars and planets apart within 0.3 to 0.5 AU"),
+                ("1e9", 1.0e9, "swallows them whole; its horizon is 20 AU"),
+            ):
                 if imgui.small_button(f"{label} M_sun##hole"):
                     settings["new_mass"] = value
+                imgui.set_item_tooltip(does)
                 imgui.same_line()
             imgui.text_disabled("presets")
         imgui.set_next_item_width(FIELD_WIDTH)
@@ -417,15 +531,28 @@ class SceneEditor:
             settings["new_mass"] = max(mass, 0.0)
         imgui.set_item_tooltip("Starting mass; scroll while placing to change it")
 
-        imgui.set_next_item_width(FIELD_WIDTH)
-        changed, radius = imgui.input_double(
-            "Draw size##new", settings["new_radius"], 0.0, 0.0, "%.4f"
-        )
-        if changed:
-            settings["new_radius"] = max(radius, 0.0)
-        imgui.set_item_tooltip(
-            "Drawn radius in AU (display only). The physical radius is\nthat of a body of Earth's density with the placed mass."
-        )
+        if hole:
+            # What this hole will do, with the numbers for the current zoom.
+            m = self.m
+            au_per_px = m.visible_scale / 4.0  # visible_scale is the size of 4 pixels
+            imgui.text_disabled(hole_summary(settings["new_mass"], self.G, au_per_px))
+            imgui.text_disabled(
+                "Drawn at its true size (the horizon), but never\n"
+                f"smaller than {HOLE_MIN_PX:.0f} px: that minimum is display only."
+            )
+        else:
+            imgui.set_next_item_width(FIELD_WIDTH)
+            changed, radius = imgui.input_double(
+                "Draw size##new", settings["new_radius"], 0.0, 0.0, "%.4f"
+            )
+            if changed:
+                settings["new_radius"] = max(radius, 0.0)
+            imgui.set_item_tooltip(
+                "Drawn radius in AU (display only, usually much larger than the\n"
+                "body). The physical radius follows from the kind and the mass:\n"
+                "a main-sequence star's for Star (the Sun: 0.0047 AU), that of a\n"
+                "body of Earth's density for Body."
+            )
 
         imgui.set_next_item_width(FIELD_WIDTH)
         _, color = imgui.color_edit3("Colour##new", settings["new_color"])
@@ -447,17 +574,27 @@ class SceneEditor:
         nb, scene = m.nb, m.scene
 
         imgui.set_next_item_width(FIELD_WIDTH)
-        changed, name = imgui.input_text("Name", scene.names[i])
+        # Applied on Enter, not per keystroke: names are kept unique (see
+        # rename_body), which must not interfere with typing.
+        changed, name = imgui.input_text(
+            "Name", scene.names[i], imgui.InputTextFlags_.enter_returns_true
+        )
         if changed:
             m.rename_body(i, name)
+        imgui.set_item_tooltip("Press Enter to apply. A name already in use gets a number.")
 
         imgui.set_next_item_width(FIELD_WIDTH)
         changed, mass = imgui.input_double("Mass", float(nb.mass[i]), 0.0, 0.0, "%.4e")
         if changed:
+            true_size = nb.black_hole[i] and np.isclose(scene.radii[i], nb.radius[i], rtol=1e-6)
             nb.mass[i] = max(mass, 0.0)
             if nb.black_hole[i]:
                 nb.radius[i] = schwarzschild_radius(nb.mass[i], G)
+                if true_size:
+                    scene.radii[i] = float(nb.radius[i])  # still drawn at its true size
             m.state_edited()
+        if nb.black_hole[i]:
+            imgui.text_disabled(hole_summary(float(nb.mass[i]), G, m.visible_scale / 4.0))
 
         new_pos = _edit_vec3("Pos", nb.pos[i])
         if new_pos is not None:
@@ -487,11 +624,18 @@ class SceneEditor:
         changed, hole = imgui.checkbox("Black hole", bool(nb.black_hole[i]))
         if changed:
             nb.black_hole[i] = hole
-            nb.radius[i] = schwarzschild_radius(nb.mass[i], G) if hole else rocky_radius(nb.mass[i])
+            # Back from a hole: a star's radius or a rocky body's, by mass.
+            nb.radius[i] = (
+                schwarzschild_radius(nb.mass[i], G)
+                if hole
+                else body_radius_without_horizon(nb.mass[i])
+            )
             m.state_edited()
         imgui.set_item_tooltip(
-            "Radius = horizon, 2 G M / c^2. Absorbs whatever comes within\n"
-            "3 horizon radii, and is what remains of any merger."
+            "Radius = horizon, 2 G M / c^2. Tears apart or swallows what comes\n"
+            "to it, and is what remains of any merger. Unticked, the radius\n"
+            "becomes a main-sequence star's (above 0.08 solar masses) or a\n"
+            "rocky body's."
         )
 
         imgui.set_next_item_width(FIELD_WIDTH)
@@ -499,7 +643,10 @@ class SceneEditor:
         if changed:
             scene.radii[i] = max(radius, 0.0)
             m.style_edited()
-        imgui.set_item_tooltip("Drawn radius in AU (display only)")
+        imgui.set_item_tooltip(
+            "Drawn radius in AU (display only). A black hole is never drawn\n"
+            f"smaller than {HOLE_MIN_PX:.0f} px, whatever this says."
+        )
 
         imgui.begin_disabled(nb.N < 2)
         if imgui.button("Make orbit"):
@@ -553,7 +700,7 @@ class SceneEditor:
                 self.press_pos = None
             return
 
-        hover = pick_body(camera, W, H, nb.pos, scene.radii, m.renderer.min_radius_px, mouse)
+        hover = pick_body(camera, W, H, nb.pos, scene.radii, self._min_px(), mouse)
 
         if ctrl:
             # The app does not see the wheel while we hold the mouse, so zoom here.
@@ -631,6 +778,13 @@ class SceneEditor:
         self.selected = shift(self.selected)
         self.orbit_source = shift(self.orbit_source)
 
+    def on_body_inserted(self, i):
+        """Keep indices right after a body is inserted at index i."""
+        if self.selected is not None and self.selected >= i:
+            self.selected += 1
+        if self.orbit_source is not None and self.orbit_source >= i:
+            self.orbit_source += 1
+
     # ----------------------------------------------------------- placing
 
     def _anchor(self):
@@ -679,20 +833,50 @@ class SceneEditor:
             "pos": start,
             "vel": p["vel_rel"] + anchor_vel,
             "color": tuple(settings["new_color"]),
-            "radius": settings["new_radius"],
-            # Physical radius for collisions: a body of Earth's density, or
-            # for a black hole its horizon.
+            # Physical radius: a rocky body's or a star's, or for a black
+            # hole its horizon.
             "phys_radius": new_body_radius(settings["new_kind"], p["mass"], G),
             "black_hole": settings["new_kind"] == "Black hole",
         }
+        # A hole is drawn at its true size (the renderer keeps it visible).
+        body["radius"] = body["phys_radius"] if body["black_hole"] else settings["new_radius"]
 
         if not p["dragging"] and not ctrl:
             self.placing = None
             self.m.add_body(body)
             self.selected = self.m.nb.N - 1
+            if body["black_hole"]:
+                self._frame_new_hole(camera, self.selected)
             return
 
         self._draw_placing(camera, G, W, H, draw_list, body, start + p["vel_rel"] / speed)
+
+    def _frame_new_hole(self, camera, i):
+        """Say so if a hole just placed is larger than the view (the camera is not moved)."""
+        m = self.m
+        horizon = float(m.nb.radius[i])
+        if camera.distance < HOLE_VIEW_HORIZONS * horizon:
+            m.notes.append(
+                (
+                    m.ids[i],
+                    f"This hole is larger than the view: its horizon has a radius of {horizon:.3g} AU",
+                    time.perf_counter(),
+                )
+            )
+
+    def _fate(self, pos, mass, radius):
+        """What happens at once to a body placed at `pos`, or None: inside a
+        hole's tidal radius it is torn, inside the horizon (or the tidal
+        radius of a hole too massive to tear it) swallowed."""
+        nb = self.m.nb
+        for h in np.flatnonzero(nb.black_hole):
+            d = np.linalg.norm(pos - nb.pos[h])
+            if is_torn_before_horizon(radius, mass, nb.mass[h], nb.radius[h]):
+                if d < tidal_radius(radius, mass, nb.mass[h]):
+                    return "inside the tidal radius: torn apart at once"
+            elif d < nb.radius[h]:
+                return "inside the horizon: swallowed at once"
+        return None
 
     def _draw_placing(self, camera, G, W, H, draw_list, body, drag_end):
         m = self.m
@@ -701,6 +885,20 @@ class SceneEditor:
         draw_path(draw_list, camera, W, H, m.predict_path(extra=body), body["color"])
         if not body["black_hole"]:
             self._draw_hole_zones(camera, W, H, draw_list, body["mass"], body["phys_radius"])
+        else:
+            # The hole's own scale, before it is placed: its horizon, and
+            # where it would tear a star like the Sun apart.
+            self._draw_zone_rings(
+                camera,
+                W,
+                H,
+                draw_list,
+                body["pos"],
+                body["phys_radius"],
+                tidal_radius(R_SUN, 1.0, body["mass"]),
+                "tears a Sun apart inside",
+                "horizon",
+            )
 
         x, y, in_front = project(camera, np.array([body["pos"], drag_end]), W, H)
         if not in_front[0]:
@@ -714,6 +912,13 @@ class SceneEditor:
         # Speed relative to the most massive body, next to the circular-orbit
         # speed around it at this distance, sqrt(G (M + m) / r).
         text = f"m = {body['mass']:.2e}"
+        fate = (
+            None
+            if body["black_hole"]
+            else self._fate(body["pos"], body["mass"], body["phys_radius"])
+        )
+        if fate is not None:
+            text += f"\n{fate}"
         if nb.N == 0:
             text += f"\nv = {np.linalg.norm(body['vel']):.3f} AU/yr"
         else:
@@ -754,26 +959,45 @@ class SceneEditor:
             # 8 G M / c^2 = 4 horizon radii in these coordinates' Newtonian
             # terms (pericentre of the L = 4 G M / c parabola).
             capture = 4.0 * nb.radius[h]
-            tidal = radius * (nb.mass[h] / mass) ** (1.0 / 3.0)
-            x, y, in_front = project(camera, nb.pos[h], W, H)
-            if not in_front[0]:
+            torn = is_torn_before_horizon(radius, mass, nb.mass[h], nb.radius[h])
+            tidal = tidal_radius(radius, mass, nb.mass[h]) if torn else 0.0
+            self._draw_zone_rings(
+                camera,
+                W,
+                H,
+                draw_list,
+                nb.pos[h],
+                capture,
+                tidal,
+                "torn apart inside",
+                "swallowed inside" if torn else "swallowed whole inside",
+            )
+
+    def _draw_zone_rings(self, camera, W, H, draw_list, centre, inner, tidal, tidal_label, label):
+        """Two circles round `centre`: `inner` (red, `label`) and `tidal` (orange,
+        `tidal_label`; 0: the hole does not tear this body, no circle). A
+        circle too small to draw at this zoom is replaced by a line of text
+        saying so."""
+        x, y, in_front = project(camera, centre, W, H)
+        if not in_front[0]:
+            return
+        for size, rgba, text in (
+            (tidal, (1.0, 0.6, 0.2, 0.8), tidal_label),
+            (inner, (1.0, 0.25, 0.25, 0.8), label),
+        ):
+            if size <= 0.0:
                 continue
-            for size, rgba, label in (
-                (tidal, (1.0, 0.6, 0.2, 0.8), "torn apart inside"),
-                (capture, (1.0, 0.25, 0.25, 0.8), "swallowed inside"),
-            ):
-                if size == tidal and tidal <= capture:
-                    continue  # the hole swallows this body whole
-                px = pixel_radii(camera, nb.pos[h], [size], H, 0.0)[0]
-                col = imgui.get_color_u32(rgba)
-                if px < 3.0:
-                    # Too small to draw at this zoom: say how small.
-                    if size == tidal:
-                        draw_list.add_text(
-                            (x[0] + 14.0, y[0] - 22.0),
-                            col,
-                            f"torn apart only inside {tidal:.2g} AU (too small to see here)",
-                        )
-                    continue
-                draw_list.add_circle((x[0], y[0]), px, col, 64, 1.0)
-                draw_list.add_text((x[0] + px * 0.71 + 3.0, y[0] - px * 0.71 - 12.0), col, label)
+            px = pixel_radii(camera, centre, [size], H, 0.0)[0]
+            col = imgui.get_color_u32(rgba)
+            if px < HOLE_MIN_PX + 2.0:
+                # Under the hole's dot at this zoom: say how small.
+                if size == tidal:
+                    draw_list.add_text(
+                        (x[0] + 14.0, y[0] - 22.0),
+                        col,
+                        f"{text} {tidal:.2g} AU: {px:.1f} px here, hidden under the"
+                        " hole's dot. Zoom in to watch (Follow the hole).",
+                    )
+                continue
+            draw_list.add_circle((x[0], y[0]), px, col, 64, 1.0)
+            draw_list.add_text((x[0] + px * 0.71 + 3.0, y[0] - px * 0.71 - 12.0), col, text)

@@ -16,6 +16,7 @@ import numpy as np
 
 from physengine.core.module import BaseModule
 from physengine.core.spec import Choice, SliderFloat
+from physengine.modules import scenario_files
 from physengine.modules.galacy_ics import (
     disc_velocities,
     ics,
@@ -24,7 +25,14 @@ from physengine.modules.galacy_ics import (
     sample_disc,
 )
 from physengine.modules.galaxy_components import BULGE, DISC, HALO, GalaxyModel
-from physengine.modules.galaxy_editor import SetupEditor, clear_edits, scene_for
+from physengine.modules.galaxy_editor import (
+    SetupEditor,
+    clear_edits,
+    has_edits,
+    save_edits,
+    scene_for,
+    scene_from_dict,
+)
 from physengine.modules.galaxy_encounters import (
     SCENES,
     SINGLE,  # noqa: F401 (tests import it from here)
@@ -201,6 +209,7 @@ class GalaxyModule(BaseModule):
         self.gpu = None  # GpuGravity once setup() has a GL context
         self.scene = None  # GalaxyScene, set by load()
         self.editor = SetupEditor(self)
+        self.scenario_message = ""  # why a saved setup was not used, for the setup window
 
     def load(self):
         """Build the initial state.
@@ -249,8 +258,31 @@ class GalaxyModule(BaseModule):
         except Exception as error:  # e.g. no OpenGL 4.3 compute shaders
             print(f"Galaxy forces: GPU unavailable ({error}); using the CPU tree")
             self.gpu = None
-        self.load()
+        pending = scenario_files.take_request("galaxy")  # opened from the home screen
+        if pending is not None:
+            try:
+                self.prepare_scenario(pending)
+            except ValueError as error:
+                self.scenario_message = f"Saved scenario not opened ({error}); showing the preset"
+        self._load_or_fall_back()
         self.renderer.setup(ctx, self.kind, self.galaxy)
+
+    def _load_or_fall_back(self):
+        """load(); if an edited or saved setup cannot be built, the preset instead.
+
+        Plumbing: a saved scenario can pass the checks of its form and still
+        not build. That must leave a working module and a message, not an
+        exception in the app's module switch.
+        """
+        if not has_edits(self.scene_name):
+            self.load()
+            return
+        try:
+            self.load()
+        except Exception as error:  # noqa: BLE001 (any failure of an edited setup)
+            clear_edits()
+            self.scenario_message = f"This setup could not be built ({error}); showing the preset"
+            self.load()
 
     def step(self, dt):
         start = time.perf_counter()
@@ -299,6 +331,20 @@ class GalaxyModule(BaseModule):
 
     def draw_ui(self):
         self.editor.update()
+
+    def prepare_scenario(self, data):
+        """Take a saved setup: it becomes the edited version of its scene.
+
+        Raises ValueError (from scene_from_dict) if `data` is not a galaxy
+        setup; nothing is changed then.
+        """
+        name, scene = scene_from_dict(data)
+        save_edits(name, scene)
+        self.scene_name = name
+
+    def load_scenario(self, data):
+        self.prepare_scenario(data)
+        self.reset_requested = True
 
     def discard_edits(self):
         clear_edits()

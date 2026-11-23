@@ -156,65 +156,6 @@ def pair_timescales(pos, vel, mass, G, debris):
 
 
 @numba.njit(cache=True)
-def hole_timescale(pos, vel, mass, G, black_hole, radius, floor, travel, zone):
-    """Shortest dynamical timescale (see min_timescale) among the pairs that
-    include a black hole; inf if there is none. Separations are counted as at
-    least `floor`, and at least the hole's handover radius. For a body that
-    is not a hole and is within `zone` of one, the time it takes to move
-    `travel` relative to the hole also counts (0: not used)."""
-    n = len(mass)
-    best = np.inf
-    for i in range(n):
-        if not black_hole[i]:
-            continue
-        for j in range(n):
-            if j == i or (black_hole[j] and j < i):
-                continue
-            r2 = 0.0
-            v2 = 0.0
-            for d in range(3):
-                r2 += (pos[j, d] - pos[i, d]) ** 2
-                v2 += (vel[j, d] - vel[i, d]) ** 2
-            r = max(np.sqrt(r2), floor, HANDOVER_RADIUS * radius[i])
-            m = mass[i] + mass[j]
-            if m > 0.0:
-                best = min(best, np.sqrt(r**3 / (G * m)))
-            if v2 > 0.0:
-                best = min(best, r / np.sqrt(v2))
-                if travel > 0.0 and not black_hole[j] and r2 < zone * zone:
-                    best = min(best, travel / np.sqrt(v2))
-    return best
-
-
-def first_contact(pos0, v, radius, h, mass=None, black_hole=None, debris=None):
-    """First pair of bodies that touch during a drift.
-
-    In a leapfrog drift every body moves in a straight line, pos0 + v t for
-    0 <= t <= h. For each pair the closest approach on that segment is at
-    t* = clip(-(r0 . dv) / |dv|^2, 0, h); the pair touches if the distance
-    there is below their reach. Checking the whole segment, not only its
-    end, catches bodies that would pass through each other within one
-    substep. Bodies with radius 0 never touch.
-
-    Reach of a pair: the sum of the radii, a black hole counting with its
-    capture radius (CAPTURE_RADIUS horizons), or with HANDOVER_RADIUS
-    horizons for a body much lighter than it; for a black hole and a body
-    that is not debris, the body's tidal radius R (M / m)^(1/3) if that is
-    larger. Two pieces of debris never touch.
-
-    Returns (i, j) for the touching pair with the earliest t*, or None.
-    """
-    n = len(radius)
-    mass = np.ones(n) if mass is None else mass
-    black_hole = np.zeros(n, dtype=np.bool_) if black_hole is None else black_hole
-    debris = np.zeros(n, dtype=np.bool_) if debris is None else debris
-    i, j = _first_contact(
-        pos0, v, radius, h, mass, black_hole, debris, CAPTURE_RADIUS, HANDOVER_RADIUS, LIGHT_BODY
-    )
-    return None if i < 0 else (i, j)
-
-
-@numba.njit(cache=True)
 def pair_reach(i, j, radius, mass, black_hole, debris, capture, handover, light):
     """Distance at which bodies i and j touch (see first_contact); 0 if they never do."""
     if radius[i] <= 0.0 or radius[j] <= 0.0 or (debris[i] and debris[j]):
@@ -232,14 +173,155 @@ def pair_reach(i, j, radius, mass, black_hole, debris, capture, handover, light)
 
 
 @numba.njit(cache=True)
-def _first_contact(pos0, v, radius, h, mass, black_hole, debris, capture, handover, light):
+def hole_pace(
+    pos,
+    vel,
+    mass,
+    G,
+    black_hole,
+    radius,
+    debris,
+    floor,
+    unseen,
+    travel,
+    zone,
+    fast_period,
+    capture,
+    handover,
+    light,
+):
+    """Shortest timescale worth slowing the display down for, among the pairs
+    that include a black hole; inf if there is none.
+
+    Two black holes: their dynamical timescale (see min_timescale), with the
+    separation counted as at least `floor` and at least the handover radius.
+
+    A black hole i and an ordinary body or piece of debris j: the same, but
+    only if the pair is something to watch. From the relative position and
+    velocity, as a two-body orbit with mu = G (m_i + m_j):
+        energy       E = v^2 / 2 - mu / r          (bound if E < 0)
+        ang. mom.    h = |r x v|
+        eccentricity e = sqrt(1 + 2 E h^2 / mu^2)
+        pericentre   q = (h^2 / mu) / (1 + e)
+        period       P = 2 pi sqrt(a^3 / mu),  a = -mu / (2 E)
+    (e.g. Murray & Dermott, Solar System Dynamics, 1999, sec. 2.3-2.4). The
+    pair is an event, which ends by itself, if the body is unbound (it
+    passes and leaves) or if q is inside the pair's reach (pair_reach: it
+    will be captured, handed to the exact orbit or torn; debris bound to the
+    hole also when q is inside `unseen[i]`, where it is counted as accreted).
+    A bound orbit that is not an event counts only if its period is at
+    least `fast_period`: a faster one is an ordinary fast orbit, like a
+    moon's, and slowing down for it would never end. A body closer to the
+    hole than `unseen[i]` (what cannot be told apart from the hole on
+    screen; 0 without a view) does not count at all.
+
+    For an event within `zone` of the hole, the time the body takes to move
+    `travel` relative to the hole also counts (0: not used).
+    """
+    n = len(mass)
+    best = np.inf
+    for i in range(n):
+        if not black_hole[i]:
+            continue
+        for j in range(n):
+            if j == i or (black_hole[j] and j < i):
+                continue
+            r2 = 0.0
+            v2 = 0.0
+            for d in range(3):
+                r2 += (pos[j, d] - pos[i, d]) ** 2
+                v2 += (vel[j, d] - vel[i, d]) ** 2
+            sep = np.sqrt(r2)
+            m = mass[i] + mass[j]
+            event = False
+            if not black_hole[j]:
+                if sep < unseen[i]:
+                    continue
+                mu = G * m
+                if mu > 0.0 and sep > 0.0:
+                    e_orbit = 0.5 * v2 - mu / sep
+                    cx = (pos[j, 1] - pos[i, 1]) * (vel[j, 2] - vel[i, 2]) - (
+                        pos[j, 2] - pos[i, 2]
+                    ) * (vel[j, 1] - vel[i, 1])
+                    cy = (pos[j, 2] - pos[i, 2]) * (vel[j, 0] - vel[i, 0]) - (
+                        pos[j, 0] - pos[i, 0]
+                    ) * (vel[j, 2] - vel[i, 2])
+                    cz = (pos[j, 0] - pos[i, 0]) * (vel[j, 1] - vel[i, 1]) - (
+                        pos[j, 1] - pos[i, 1]
+                    ) * (vel[j, 0] - vel[i, 0])
+                    h2 = cx * cx + cy * cy + cz * cz
+                    ecc = np.sqrt(max(1.0 + 2.0 * e_orbit * h2 / (mu * mu), 0.0))
+                    q = h2 / mu / (1.0 + ecc)
+                    reach = pair_reach(
+                        i, j, radius, mass, black_hole, debris, capture, handover, light
+                    )
+                    if debris[j] and e_orbit < 0.0:
+                        reach = max(reach, unseen[i])
+                    event = e_orbit >= 0.0 or q < reach
+                    if not event:
+                        a = -mu / (2.0 * e_orbit)
+                        if 2.0 * np.pi * np.sqrt(a**3 / mu) < fast_period:
+                            continue
+            r = max(sep, floor, handover * radius[i])
+            if m > 0.0:
+                best = min(best, np.sqrt(r**3 / (G * m)))
+            if v2 > 0.0:
+                best = min(best, r / np.sqrt(v2))
+                if event and travel > 0.0 and r2 < zone * zone:
+                    best = min(best, travel / np.sqrt(v2))
+    return best
+
+
+def first_contact(pos0, v, radius, h, mass=None, black_hole=None, debris=None, partner=None):
+    """First pair of bodies that touch during a drift.
+
+    In a leapfrog drift every body moves in a straight line, pos0 + v t for
+    0 <= t <= h. For each pair the closest approach on that segment is at
+    t* = clip(-(r0 . dv) / |dv|^2, 0, h); the pair touches if the distance
+    there is below their reach. Checking the whole segment, not only its
+    end, catches bodies that would pass through each other within one
+    substep. Bodies with radius 0 never touch.
+
+    Reach of a pair: the sum of the radii, a black hole counting with its
+    capture radius (CAPTURE_RADIUS horizons), or with HANDOVER_RADIUS
+    horizons for a body much lighter than it; for a black hole and a body
+    that is not debris, the body's tidal radius R (M / m)^(1/3) if that is
+    larger. Two pieces of debris never touch, and neither do a body and its
+    `partner` (per body, the index of the other member of a pair whose orbit
+    is followed analytically, nbody_binary.py, or -1).
+
+    Returns (i, j) for the touching pair with the earliest t*, or None.
+    """
+    n = len(radius)
+    mass = np.ones(n) if mass is None else mass
+    black_hole = np.zeros(n, dtype=np.bool_) if black_hole is None else black_hole
+    debris = np.zeros(n, dtype=np.bool_) if debris is None else debris
+    partner = np.full(n, -1, dtype=np.int64) if partner is None else partner
+    i, j = _first_contact(
+        pos0,
+        v,
+        radius,
+        h,
+        mass,
+        black_hole,
+        debris,
+        CAPTURE_RADIUS,
+        HANDOVER_RADIUS,
+        LIGHT_BODY,
+        partner,
+    )
+    return None if i < 0 else (i, j)
+
+
+@numba.njit(cache=True)
+def _first_contact(pos0, v, radius, h, mass, black_hole, debris, capture, handover, light, partner):
     n = len(radius)
     best_i, best_j, best_t = -1, -1, np.inf
     for i in range(n):
         if debris[i] or radius[i] <= 0.0:
             continue  # pairs of debris never touch: start from the ordinary bodies
         for j in range(n):
-            if j == i or (not debris[j] and j < i) or radius[j] <= 0.0:
+            if j == i or (not debris[j] and j < i) or radius[j] <= 0.0 or partner[i] == j:
                 continue
             reach = pair_reach(i, j, radius, mass, black_hole, debris, capture, handover, light)
             if reach <= 0.0:
@@ -323,6 +405,9 @@ class Integrator:
         self.last_level = 0  # deepest substep level k used by the last step
         self.last_substeps = 0  # substeps computed by the last step
         self.debris = None  # the state's debris flags during advance(), if it has any
+        # nbody_binary.Held, if the force treats some pairs as single bodies:
+        # their members do not touch each other.
+        self.held = None
 
     def invalidate(self):
         self.acc_cache = None
@@ -367,6 +452,7 @@ class Integrator:
             self.acc_cache = self._acc(state.pos, mass, state.vel)
         acc = self.acc_cache
         pos, vel = state.pos.copy(), state.vel.copy()
+        partner = None if self.held is None else self.held.partner(len(mass))
 
         # Time within the step in ticks of dt / 2^max_level.
         total = 1 << self.max_level
@@ -385,7 +471,7 @@ class Integrator:
                 continue
             if check_contact:
                 pair = first_contact(
-                    pos, v_half, state.radius, h, mass, state.black_hole, state.debris
+                    pos, v_half, state.radius, h, mass, state.black_hole, state.debris, partner
                 )
             pos, vel, acc = new_pos, new_vel, new_acc
             done += total >> k

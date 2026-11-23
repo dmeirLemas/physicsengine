@@ -39,9 +39,18 @@ Inside r_t = R (M_hole / m)^(1/3) the hole's tide exceeds the body's own
 gravity (Rees 1988, Nature 333, 523) and pulls it apart: the body is
 replaced by N_TIDAL pieces spread through its volume, all with its velocity.
 From there gravity alone stretches them into a stream ("spaghettification"),
-roughly half of it bound to the hole. If r_t is inside the hole's capture
-radius, the body goes in whole: for the Sun that needs a hole above ~1e8
-solar masses (Hills 1975, Nature 254, 295); denser bodies need less.
+roughly half of it bound to the hole. If r_t is inside the hole's horizon,
+2 G M / c^2, the body goes in whole: for the Sun that needs a hole above
+1.1e8 solar masses (the Hills mass; Hills 1975, Nature 254, 295), for a
+body of Earth's density above 5.8e7, whatever its mass. The rule is the
+same wherever the body is: inside r_t it is torn, unless r_t is inside the
+horizon (`is_torn_before_horizon`).
+
+Bound debris comes back to its pericentre, where the stream runs into
+itself, loses its orbital energy in shocks and is accreted; the hole is fed
+at the rate at which the debris returns (Rees 1988). The debris here does
+not interact with itself, so the module applies that directly where the
+pericentre is too small to be seen (nbodymodule._accrete_unresolved).
 """
 
 import numpy as np
@@ -107,3 +116,17 @@ def tidal_pieces(radius, rng, n=N_TIDAL):
     d = rng.normal(size=(n, 3))
     d /= np.linalg.norm(d, axis=1, keepdims=True)
     return radius * np.cbrt(rng.uniform(0.0, 1.0, n))[:, None] * d
+
+
+def tidal_radius(radius, mass, hole_mass):
+    """r_t = R (M_hole / m)^(1/3) (Rees 1988); inf for a body without mass."""
+    if mass <= 0.0:
+        return np.inf if radius > 0.0 else 0.0
+    return radius * (hole_mass / mass) ** (1.0 / 3.0)
+
+
+def is_torn_before_horizon(radius, mass, hole_mass, horizon):
+    """Whether the hole's tide tears the body before it reaches the horizon
+    (radius `horizon` = 2 G M / c^2): r_t > horizon, i.e. the hole is below
+    the Hills mass for this body. A body without size is never torn."""
+    return bool(radius > 0.0 and tidal_radius(radius, mass, hole_mass) > horizon)

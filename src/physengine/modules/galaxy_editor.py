@@ -7,11 +7,21 @@ edits, Full reset returns to the preset (galaxy_encounters.SCENES).
 Units: kpc, 1e10 solar masses, degrees.
 """
 
+import math
 from copy import deepcopy
+from dataclasses import asdict, fields
 
 from imgui_bundle import imgui
 
-from physengine.modules.galaxy_encounters import SCENES, apocentre
+from physengine.modules import scenario_files
+from physengine.modules.galaxy_components import ExponentialDisc, GalaxyModel, Hernquist
+from physengine.modules.galaxy_encounters import (
+    SCENES,
+    DiscAngles,
+    Encounter,
+    GalaxyScene,
+    apocentre,
+)
 
 WINDOW_MARGIN = 10.0
 FIELD_WIDTH = 170.0
@@ -53,9 +63,147 @@ def save_edits(scene_name, scene):
     _edited = (scene_name, deepcopy(scene))
 
 
+def has_edits(scene_name):
+    """Whether scene_for(scene_name) gives an edited scene rather than the preset."""
+    return _edited is not None and _edited[0] == scene_name
+
+
 def clear_edits():
     global _edited
     _edited = None
+
+
+def scene_to_dict(scene_name, scene):
+    """A galaxy scene (models, orbit, disc angles) as a dictionary for scenario_files."""
+    return {"scene_name": scene_name, "scene": asdict(scene)}
+
+
+# Most particles one component may have in a saved setup (the sliders stop at
+# 20 000): a hand-edited file must not ask for more than the machine can hold.
+MAX_SAVED_PARTICLES = 200_000
+
+
+def _number(raw, key, where, positive=False):
+    """raw[key] as a finite float; ValueError says what is wrong and where."""
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{where}: '{key}' must be a number, not {value!r}")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"{where}: '{key}' must be finite")
+    if positive and value <= 0.0:
+        raise ValueError(f"{where}: '{key}' must be above 0")
+    return value
+
+
+def _count(raw, key, where):
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{where}: '{key}' must be a whole number, not {value!r}")
+    if not 1 <= value <= MAX_SAVED_PARTICLES:
+        raise ValueError(f"{where}: '{key}' must be between 1 and {MAX_SAVED_PARTICLES}")
+    return value
+
+
+def _fields(raw, cls, where):
+    """Check that `raw` is a JSON object with exactly the fields of dataclass `cls`."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where} must be an object, not {type(raw).__name__}")
+    names = {f.name for f in fields(cls)}
+    missing = sorted(names - set(raw))
+    extra = sorted(set(raw) - names)
+    if missing:
+        raise ValueError(f"{where}: missing {', '.join(missing)}")
+    if extra:
+        raise ValueError(f"{where}: unknown {', '.join(map(str, extra))}")
+    return raw
+
+
+def _list(raw, length, where):
+    if not isinstance(raw, list) or len(raw) != length:
+        raise ValueError(f"{where} must be a list of {length}")
+    return raw
+
+
+def _hernquist_from(raw, where):
+    raw = _fields(raw, Hernquist, where)
+    return Hernquist(
+        n=_count(raw, "n", where),
+        mass=_number(raw, "mass", where, positive=True),
+        a=_number(raw, "a", where, positive=True),
+        r_max=_number(raw, "r_max", where, positive=True),
+    )
+
+
+def _disc_from(raw, where):
+    raw = _fields(raw, ExponentialDisc, where)
+    return ExponentialDisc(
+        n=_count(raw, "n", where),
+        **{
+            key: _number(raw, key, where, positive=True)
+            for key in ("mass", "R_d", "z0", "R_max", "Q")
+        },
+    )
+
+
+def _encounter_from(raw):
+    where = "encounter"
+    raw = _fields(raw, Encounter, where)
+    pericentre = _number(raw, "pericentre", where)
+    eccentricity = _number(raw, "eccentricity", where)
+    start = _number(raw, "start_distance", where, positive=True)
+    if pericentre < 0.0 or eccentricity < 0.0:
+        raise ValueError("encounter: pericentre and eccentricity must be 0 or more")
+    if pericentre == 0.0 and eccentricity < 1.0:
+        raise ValueError("encounter: a head-on orbit (pericentre 0) needs eccentricity 1 or more")
+    # The same limits the Start distance slider keeps: on the orbit.
+    if not pericentre <= start <= apocentre(pericentre, eccentricity):
+        raise ValueError("encounter: the start distance is not on the orbit")
+    discs = []
+    for g, angles in enumerate(_list(raw["discs"], 2, "encounter: 'discs'")):
+        at = f"encounter, disc {g + 1}"
+        angles = _fields(angles, DiscAngles, at)
+        discs.append(
+            DiscAngles(
+                inclination=_number(angles, "inclination", at),
+                argument=_number(angles, "argument", at),
+            )
+        )
+    return Encounter(
+        pericentre=pericentre, eccentricity=eccentricity, start_distance=start, discs=discs
+    )
+
+
+def scene_from_dict(data):
+    """(scene name, GalaxyScene) from scene_to_dict's dictionary.
+
+    Checks the form of everything in it (fields present, numbers finite and
+    of the right sign, one galaxy without an encounter or two with one) and
+    raises ValueError saying what is wrong. Nothing is changed by a failure.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("a galaxy scenario must be an object")
+    for key in ("scene_name", "scene"):
+        if key not in data:
+            raise ValueError(f"not a galaxy scenario: '{key}' is missing")
+    name = data["scene_name"]
+    if not isinstance(name, str) or name not in SCENES:
+        raise ValueError(f"unknown scene {name!r}")
+    raw = _fields(data["scene"], GalaxyScene, "scene")
+    encounter = None if raw["encounter"] is None else _encounter_from(raw["encounter"])
+    count = 1 if encounter is None else 2
+    galaxies = []
+    for g, model in enumerate(_list(raw["galaxies"], count, f"scene: 'galaxies' ({count})")):
+        at = f"galaxy {g + 1}"
+        model = _fields(model, GalaxyModel, at)
+        galaxies.append(
+            GalaxyModel(
+                halo=_hernquist_from(model["halo"], f"{at} halo"),
+                bulge=_hernquist_from(model["bulge"], f"{at} bulge"),
+                disc=_disc_from(model["disc"], f"{at} disc"),
+            )
+        )
+    return name, GalaxyScene(galaxies=galaxies, encounter=encounter)
 
 
 # ---------------------------------------------------------------- widgets
@@ -195,6 +343,18 @@ class SetupEditor:
 
         imgui.text_disabled(f"{m.scene_name} (?)")
         imgui.set_item_tooltip(HELP)
+        # Save writes the scene that is running (m.scene), not the draft below.
+        unapplied = self.draft != m.scene
+        scenario_files.draw(
+            "galaxy",
+            lambda: scene_to_dict(m.scene_name, m.scene),
+            m.load_scenario,
+            note="Save stores the running setup: Apply first to include the edits below"
+            if unapplied
+            else None,
+        )
+        if getattr(m, "scenario_message", ""):
+            imgui.text_colored((1.0, 0.55, 0.4, 1.0), m.scenario_message)
 
         draft = self.draft
         enc = draft.encounter

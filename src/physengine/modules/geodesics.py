@@ -33,12 +33,42 @@ as a distant observer sees it; it is removed once r < 2 (1 + CAPTURE_MARGIN).
 Bodies also pull on each other with Newtonian gravity (softened), added to
 d^2x/dtau^2. This is the weak-field, slow-motion limit of their mutual
 gravity and assumes the bodies are much lighter than the hole.
+
+Speed (2026-11-23). The kernels below run every frame on a few thousand
+bodies, which is little work per call: what they cost is set as much by how
+they are written as by the physics. They avoid allocating inside loops, the
+mutual pull is a branch-free sum the compiler can vectorise, and they run on
+KERNEL_THREADS threads (see few_threads).
 """
+
+from contextlib import contextmanager
 
 import numba
 import numpy as np
 
 CAPTURE_MARGIN = 1e-3  # removed at r < 2 (1 + this): already frozen and faded
+
+# Threads for the black-hole module's parallel kernels. Each call is a
+# fraction of a millisecond of work; on more threads than this the time to
+# wake them (and the cores they keep busy while they wait for the next call)
+# costs more than the extra threads save, and on a laptop with integrated
+# graphics the busy cores slow the GPU's ray trace down (measured on the
+# 14-core dev machine: 6 threads against the default 20, see TODO.md).
+KERNEL_THREADS = max(1, min(6, numba.config.NUMBA_NUM_THREADS))
+
+
+@contextmanager
+def few_threads(count=None):
+    """Run Numba's parallel loops on at most `count` (KERNEL_THREADS) threads inside the block.
+
+    Not physics: the results do not depend on the number of threads.
+    """
+    before = numba.get_num_threads()
+    numba.set_num_threads(max(1, min(KERNEL_THREADS if count is None else count, before)))
+    try:
+        yield
+    finally:
+        numba.set_num_threads(before)
 
 
 @numba.njit(cache=True)
@@ -59,24 +89,46 @@ def angular_momentum(x, w):
     return np.linalg.norm(np.cross(x, w), axis=1)
 
 
-@numba.njit(parallel=True, cache=True)
+@numba.njit(parallel=True, cache=True, fastmath={"reassoc", "contract"})
 def newtonian_mutual(x, mass, alive, eps, out):
-    """Softened Newtonian pull of the bodies on each other (direct sum)."""
+    """Softened Newtonian pull of the bodies on each other (direct sum).
+
+    out[i] = sum_j m_j d / (|d|^2 + eps^2)^1.5, d = x_j - x_i, over the live
+    bodies j with mass; zero for bodies that are not alive. Every pair is
+    summed (no approximation). The sources are first packed into contiguous
+    arrays and the inner loop has no branches: a body's own term is exactly
+    zero (d = 0), so it need not be skipped, and with eps = 0 a pair at zero
+    distance is left out. The sum may be reordered by the compiler (to use
+    vector instructions), which changes the result in the last digits only.
+    """
     n = len(x)
     e2 = eps * eps
+    sx = np.empty(n)
+    sy = np.empty(n)
+    sz = np.empty(n)
+    sm = np.empty(n)
+    ns = 0
+    for j in range(n):
+        if alive[j] and mass[j] != 0.0:
+            sx[ns] = x[j, 0]
+            sy[ns] = x[j, 1]
+            sz[ns] = x[j, 2]
+            sm[ns] = mass[j]
+            ns += 1
     for i in numba.prange(n):
         ax = 0.0
         ay = 0.0
         az = 0.0
         if alive[i]:
-            for j in range(n):
-                if j == i or not alive[j] or mass[j] == 0.0:
-                    continue
-                dx = x[j, 0] - x[i, 0]
-                dy = x[j, 1] - x[i, 1]
-                dz = x[j, 2] - x[i, 2]
+            xi = x[i, 0]
+            yi = x[i, 1]
+            zi = x[i, 2]
+            for j in range(ns):
+                dx = sx[j] - xi
+                dy = sy[j] - yi
+                dz = sz[j] - zi
                 d2 = dx * dx + dy * dy + dz * dz + e2
-                f = mass[j] / (d2 * np.sqrt(d2))
+                f = sm[j] / (d2 * np.sqrt(d2)) if d2 > 0.0 else 0.0
                 ax += f * dx
                 ay += f * dy
                 az += f * dz
@@ -113,28 +165,120 @@ def _drift(x, w, alive, duration, eta, max_step, capture_r, t0, captured_at):
     for i in numba.prange(len(x)):
         if not alive[i]:
             continue
-        s = np.empty(6)
-        s[0], s[1], s[2] = x[i, 0], x[i, 1], x[i, 2]
-        s[3], s[4], s[5] = w[i, 0], w[i, 1], w[i, 2]
+        s0, s1, s2 = x[i, 0], x[i, 1], x[i, 2]
+        s3, s4, s5 = w[i, 0], w[i, 1], w[i, 2]
         done = 0.0
         while duration - done > 1e-12:
-            r = np.sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2])
+            r = np.sqrt(s0 * s0 + s1 * s1 + s2 * s2)
             h = min(eta * r * np.sqrt(r), max_step, duration - done)
-            k1 = np.array(_deriv_one(s[0], s[1], s[2], s[3], s[4], s[5]))
-            m = s + 0.5 * h * k1
-            k2 = np.array(_deriv_one(m[0], m[1], m[2], m[3], m[4], m[5]))
-            m = s + 0.5 * h * k2
-            k3 = np.array(_deriv_one(m[0], m[1], m[2], m[3], m[4], m[5]))
-            m = s + h * k3
-            k4 = np.array(_deriv_one(m[0], m[1], m[2], m[3], m[4], m[5]))
-            s = s + h / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            hh = 0.5 * h
+            a0, a1, a2, a3, a4, a5 = _deriv_one(s0, s1, s2, s3, s4, s5)
+            b0, b1, b2, b3, b4, b5 = _deriv_one(
+                s0 + hh * a0, s1 + hh * a1, s2 + hh * a2, s3 + hh * a3, s4 + hh * a4, s5 + hh * a5
+            )
+            c0, c1, c2, c3, c4, c5 = _deriv_one(
+                s0 + hh * b0, s1 + hh * b1, s2 + hh * b2, s3 + hh * b3, s4 + hh * b4, s5 + hh * b5
+            )
+            d0, d1, d2, d3, d4, d5 = _deriv_one(
+                s0 + h * c0, s1 + h * c1, s2 + h * c2, s3 + h * c3, s4 + h * c4, s5 + h * c5
+            )
+            h6 = h / 6.0
+            s0 = s0 + h6 * (a0 + 2.0 * b0 + 2.0 * c0 + d0)
+            s1 = s1 + h6 * (a1 + 2.0 * b1 + 2.0 * c1 + d1)
+            s2 = s2 + h6 * (a2 + 2.0 * b2 + 2.0 * c2 + d2)
+            s3 = s3 + h6 * (a3 + 2.0 * b3 + 2.0 * c3 + d3)
+            s4 = s4 + h6 * (a4 + 2.0 * b4 + 2.0 * c4 + d4)
+            s5 = s5 + h6 * (a5 + 2.0 * b5 + 2.0 * c5 + d5)
             done += h
-            if s[0] * s[0] + s[1] * s[1] + s[2] * s[2] < capture_r * capture_r:
+            if s0 * s0 + s1 * s1 + s2 * s2 < capture_r * capture_r:
                 alive[i] = False
                 captured_at[i] = t0 + done
                 break
-        x[i, 0], x[i, 1], x[i, 2] = s[0], s[1], s[2]
-        w[i, 0], w[i, 1], w[i, 2] = s[3], s[4], s[5]
+        x[i, 0], x[i, 1], x[i, 2] = s0, s1, s2
+        w[i, 0], w[i, 1], w[i, 2] = s3, s4, s5
+
+
+@numba.njit(cache=True)
+def _apply_kick(x, w, acc, alive, dt, dtau):
+    """w += acc dtau for the live bodies, dtau = dt (1 - 2/r) / E their proper time (kept in dtau)."""
+    for i in range(len(x)):
+        dtau[i] = 0.0
+        if not alive[i]:
+            continue
+        r = np.sqrt(x[i, 0] ** 2 + x[i, 1] ** 2 + x[i, 2] ** 2)
+        vr = (x[i, 0] * w[i, 0] + x[i, 1] * w[i, 1] + x[i, 2] * w[i, 2]) / r
+        w2 = w[i, 0] ** 2 + w[i, 1] ** 2 + w[i, 2] ** 2
+        e = np.sqrt(max(vr * vr + (1.0 - 2.0 / r) * (1.0 + w2 - vr * vr), 0.0))
+        dtau[i] = dt * ((1.0 - 2.0 / r) / e)
+        w[i, 0] += dtau[i] * acc[i, 0]
+        w[i, 1] += dtau[i] * acc[i, 1]
+        w[i, 2] += dtau[i] * acc[i, 2]
+
+
+@numba.njit(cache=True)
+def _state_at(hx, hw, k_last, spacing, now, sx, sw, which, t, geodesic, x, w, known):
+    """History.state_at for every row: body which[i] at time t[i] (see there).
+
+    hx, hw: the ring buffer; sx, sw: the bodies now, at time `now`. geodesic:
+    the stored w is dx/dtau and dx/dt = w (1 - 2/r) / E (a BodySystem);
+    otherwise w is dx/dt itself.
+    """
+    length = hx.shape[0]
+    p0 = np.empty(3)
+    p1 = np.empty(3)
+    q0 = np.empty(3)
+    q1 = np.empty(3)
+    for i in range(len(which)):
+        j = which[i]
+        ti = min(t[i], now)
+        k0 = int(np.floor(ti / spacing))
+        ok = k0 > k_last - length
+        if not ok:
+            k0 = k_last
+        slot = k0 % length
+        t0 = k0 * spacing
+        newest = k0 >= k_last
+        slot1 = slot
+        t1 = now
+        if not newest:
+            t1 = (k0 + 1) * spacing
+            slot1 = min(k0 + 1, k_last) % length
+        for c in range(3):
+            p0[c] = hx[slot, j, c]
+            q0[c] = hw[slot, j, c]
+            if newest:
+                p1[c] = sx[j, c]
+                q1[c] = sw[j, c]
+            else:
+                p1[c] = hx[slot1, j, c]
+                q1[c] = hw[slot1, j, c]
+        span = max(t1 - t0, 1e-12)
+        f = min(max((ti - t0) / span, 0.0), 1.0)
+        g0 = span
+        g1 = span
+        if geodesic:
+            r = np.sqrt(p0[0] ** 2 + p0[1] ** 2 + p0[2] ** 2)
+            vr = (p0[0] * q0[0] + p0[1] * q0[1] + p0[2] * q0[2]) / r
+            w2 = q0[0] ** 2 + q0[1] ** 2 + q0[2] ** 2
+            e = np.sqrt(max(vr * vr + (1.0 - 2.0 / r) * (1.0 + w2 - vr * vr), 0.0))
+            g0 = span * ((1.0 - 2.0 / r) / max(e, 1e-300))
+            r = np.sqrt(p1[0] ** 2 + p1[1] ** 2 + p1[2] ** 2)
+            vr = (p1[0] * q1[0] + p1[1] * q1[1] + p1[2] * q1[2]) / r
+            w2 = q1[0] ** 2 + q1[1] ** 2 + q1[2] ** 2
+            e = np.sqrt(max(vr * vr + (1.0 - 2.0 / r) * (1.0 + w2 - vr * vr), 0.0))
+            g1 = span * ((1.0 - 2.0 / r) / max(e, 1e-300))
+        f2 = f * f
+        f3 = f2 * f
+        for c in range(3):
+            x[i, c] = (
+                (2 * f3 - 3 * f2 + 1) * p0[c]
+                + (f3 - 2 * f2 + f) * (q0[c] * g0)
+                + (-2 * f3 + 3 * f2) * p1[c]
+                + (f3 - f2) * (q1[c] * g1)
+            )
+            w[i, c] = (1 - f) * q0[c] + f * q1[c]
+            ok = ok and np.isfinite(x[i, c])
+        known[i] = ok
 
 
 class BodySystem:
@@ -149,6 +293,13 @@ class BodySystem:
     # Mutual pulls are applied as kicks this far apart [M]: short against the
     # slowest time scale they act on (a star's own dynamical time, ~300 M).
     OUTER_STEP = 1.0
+    # A remainder shorter than this fraction of OUTER_STEP is folded into the
+    # step before it (which is then up to 5% longer than OUTER_STEP) rather
+    # than taken as a step of its own: each step costs a full evaluation of
+    # the mutual pull (and the gas forces), however short it is. Measured
+    # 2026-11-23: in "Star torn apart, with gas" a frame was 1.006 OUTER_STEP
+    # long, so every frame paid for a second evaluation over 0.6% of it.
+    STEP_SLACK = 0.05
 
     def __init__(self, x, w, mass=None, eps=0.05):
         self.x = np.array(x, dtype=float).reshape(-1, 3)
@@ -187,15 +338,27 @@ class BodySystem:
         if not np.any(self.mass[self.alive] > 0.0):
             return
         if not self._acc_fresh:
+            v = self.w
+            if self.hydro is not None:
+                # The gas forces depend on the velocities (viscosity, heating,
+                # Balsara factors), and after a drift w is half a kick behind
+                # the positions. They are evaluated with w predicted to the end
+                # of the kick with the previous accelerations, as SPH codes do
+                # (e.g. GADGET-2, Springel 2005, MNRAS 364, 1105); otherwise
+                # the scheme is only first order in the gas forces (measured
+                # 2026-11-23 on the torn star: half the error of the scheme
+                # without it at the same step, with half the evaluations).
+                v = self.w.copy()
+                _apply_kick(self.x, v, self._acc, self.alive, dt, np.empty(len(self.x)))
             newtonian_mutual(self.x, self.mass, self.alive, self.eps, self._acc)
             if self.hydro is not None:
-                self._acc += self.hydro.accelerations(self.x, self.w, self.mass, self.alive)
+                self._acc += self.hydro.accelerations(self.x, v, self.mass, self.alive)
             self._acc_fresh = True
         live = self.alive
-        lapse = (1.0 - 2.0 / self.r()[live]) / energy(self.x[live], self.w[live])
-        self.w[live] += (dt * lapse)[:, None] * self._acc[live]
+        dtau = np.empty(len(self.x))
+        _apply_kick(self.x, self.w, self._acc, live, dt, dtau)
         if self.hydro is not None:
-            self.hydro.heat(dt * lapse, live)
+            self.hydro.heat(dtau[live], live)
 
     def advance(self, duration):
         """Advance all bodies by `duration` of coordinate time.
@@ -207,6 +370,8 @@ class BodySystem:
         end = self.t + duration
         while end - self.t > 1e-12:
             h = min(self.OUTER_STEP, end - self.t)
+            if end - self.t - h < self.STEP_SLACK * self.OUTER_STEP:  # no sliver left over
+                h = end - self.t
             if self.history is not None:  # land exactly on the next sample time
                 h = min(h, self.history.next_time() - self.t)
             self._kick(0.5 * h)
@@ -313,6 +478,29 @@ class History:
         Times older than the buffer are unknown.
         """
         which = np.asarray(which)
+        own = type(system).dx_dt
+        if own is BodySystem.dx_dt or getattr(system, "W_IS_VELOCITY", False):
+            # The same as below, in one compiled loop (no temporary arrays).
+            which = np.ascontiguousarray(np.broadcast_to(which, np.shape(t)), dtype=np.int64)
+            x = np.empty((len(which), 3))
+            w = np.empty((len(which), 3))
+            known = np.empty(len(which), dtype=np.bool_)
+            _state_at(
+                self.x,
+                self.w,
+                self.k_last,
+                self.spacing,
+                float(system.t),
+                np.ascontiguousarray(system.x, dtype=float),
+                np.ascontiguousarray(system.w, dtype=float),
+                which,
+                np.ascontiguousarray(t, dtype=float),
+                own is BodySystem.dx_dt,
+                x,
+                w,
+                known,
+            )
+            return x, w, known
         t = np.minimum(np.asarray(t, dtype=float), system.t)
         k0 = np.floor(t / self.spacing).astype(int)
         known = k0 > self.k_last - self.length
