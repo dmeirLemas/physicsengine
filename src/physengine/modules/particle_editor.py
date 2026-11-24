@@ -23,6 +23,7 @@ from physengine.modules import particle_custom as custom
 from physengine.modules import scenario_files
 from physengine.modules.particle_custom import Entry
 from physengine.modules.particle_data import ABOUT, PARTICLES
+from physengine.modules.particle_kinematics import breit_wigner_formation
 
 WINDOW_MARGIN = 10.0
 FIELD_WIDTH = 150.0
@@ -211,6 +212,30 @@ def readout(entry, field_strength):
 
 
 # ----------------------------------------------------------------- window
+
+Z_HALF_MASS = PARTICLES["Z"].mass / 2.0  # GeV per beam: sqrt(s) = M_Z for massless particles
+
+
+def set_half_z_momenta(a, b):
+    """Set both entries to momentum M_Z / 2 (directions untouched)."""
+    for e in (a, b):
+        e.quantity = "momentum"
+        e.value = Z_HALF_MASS
+
+
+def window_caption(root_s):
+    z = PARTICLES["Z"]
+    inside = abs(root_s - z.mass) <= custom.WINDOW_WIDTHS * z.width
+    return (
+        f"sqrt(s) = {root_s:.2f} GeV. Z window ({z.mass:.2f} +- {custom.WINDOW_WIDTHS:g} widths): "
+        + ("inside." if inside else "outside.")
+    )
+
+
+def formation_share_caption(root_s):
+    z = PARTICLES["Z"]
+    share = 100.0 * float(breit_wigner_formation(root_s, z.mass, z.width))
+    return f"Share of meetings forming a Z at this sqrt(s): {share:.1f} %"
 
 
 class CustomWindow:
@@ -465,12 +490,18 @@ class CustomWindow:
         if changed:
             if on:
                 custom.pair_up(setup, _selected, _partner)
+                if not paired:  # a single change on the tick, not an override
+                    set_half_z_momenta(entry, other)
             else:
                 custom.unpair(setup, _selected)
             paired = on
         imgui.set_item_tooltip(
             "The two form a Z where they meet, if their sqrt(s) is near the Z mass"
         )
+        root_s = custom.nominal_sqrt_s(entry, other)
+        if root_s is not None:
+            imgui.text_disabled(window_caption(root_s))
+            imgui.text_disabled(formation_share_caption(root_s))
         if not paired:
             imgui.text_disabled(FACE_CAPTION)
             imgui.pop_text_wrap_pos()
@@ -483,12 +514,10 @@ class CustomWindow:
         shown = [r for r in records if tuple(r["entries"]) == pair and tuple(r["names"]) == names]
         if shown and setup == self.m.custom:
             imgui.text(custom.collision_caption(shown[0]))
-        else:
-            root_s = custom.nominal_sqrt_s(entry, other)
-            if root_s is not None:
-                imgui.text_disabled(
-                    f"sqrt(s) at the set momenta = {root_s:.4f} GeV (no event drawn yet)"
-                )
+        elif root_s is not None:
+            imgui.text_disabled(
+                f"sqrt(s) at the set momenta = {root_s:.4f} GeV (no event drawn yet)"
+            )
         imgui.pop_text_wrap_pos()
 
     def _decay_controls(self, entry):

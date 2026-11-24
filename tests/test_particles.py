@@ -2609,3 +2609,67 @@ def test_custom_window_collide_controls(monkeypatch):
     other = _colliding_pair(45.0, 45.0, ("mu-", "e+"), collide=False)
     window._collide(other.entries[0], other)
     assert "Collide##pair" not in calls and any("not offered" in c for c in calls)
+
+
+def _fake_collide_window(monkeypatch, tick):
+    """CustomWindow with a fake imgui whose Collide checkbox returns `tick`
+    (changed, value) and records the text drawn."""
+    pytest.importorskip("imgui_bundle")
+    from physengine.modules import particle_editor as editor
+
+    calls = []
+
+    class Fake:
+        def checkbox(self, label, value):
+            return tick(value)
+
+        def text(self, s, *a):
+            calls.append(s)
+
+        text_disabled = text
+
+        def __getattr__(self, name):
+            return lambda *a, **k: (False, 0)
+
+    monkeypatch.setattr(editor, "imgui", Fake())
+    monkeypatch.setattr(editor, "_selected", 0)
+    monkeypatch.setattr(editor, "_partner", 1)
+    return editor, calls
+
+
+def test_ticking_collide_sets_half_z_momenta_once(monkeypatch):
+    # Reference: PDG 2024 M_Z = 91.1876 GeV, so each beam is M_Z / 2 = 45.5938
+    # GeV and sqrt(s) = 91.19 GeV (muon mass 0.1057 GeV shifts it by 2e-4 GeV).
+    setup = _colliding_pair(20.0, 30.0, ("mu+", "mu-"), collide=False)
+    editor, calls = _fake_collide_window(monkeypatch, lambda v: (True, not v))
+    m = type("M", (), {"field": 3.8, "event": None, "custom": setup})()
+    window = editor.CustomWindow(m)
+    window._collide(setup.entries[0], setup)  # tick on
+    assert custom.collision_partner(setup, 0) == 1
+    for e in setup.entries:
+        assert (e.quantity, e.value) == ("momentum", pytest.approx(45.5938, abs=1e-4))
+    assert custom.nominal_sqrt_s(*setup.entries) == pytest.approx(91.19, abs=0.01)
+    assert any(c.startswith("sqrt(s) = 91.19 GeV. Z window (91.19 +- 10 widths): inside") for c in calls)
+    setup.entries[0].value = 40.0  # user edits afterwards; ticking off changes nothing
+    window._collide(setup.entries[0], setup)  # tick off
+    assert custom.collision_partner(setup, 0) is None
+    assert setup.entries[0].value == 40.0 and setup.entries[1].value == pytest.approx(45.5938, abs=1e-4)
+    # already on: no change on a non-ticking frame
+    custom.pair_up(setup, 0, 1)
+    editor2, _ = _fake_collide_window(monkeypatch, lambda v: (False, v))
+    window._collide(setup.entries[0], setup)
+    assert setup.entries[0].value == 40.0
+
+
+def test_formation_share_caption_breit_wigner():
+    # Gamma_Z = 2.4952 GeV, M_Z = 91.1876 GeV (particle_data.py, PDG 2024);
+    # w = (G/2)^2 / ((s - M)^2 + (G/2)^2): 1 at the peak, ~0.01965 at 100 GeV.
+    from physengine.modules import particle_editor as editor
+
+    assert editor.formation_share_caption(91.1876).endswith("100.0 %")
+    w = (G_Z / 2) ** 2 / ((100.0 - M_Z) ** 2 + (G_Z / 2) ** 2)
+    assert w == pytest.approx(0.01965, abs=1e-5)
+    assert editor.formation_share_caption(100.0).endswith(f"{100 * w:.1f} %")
+    assert "2.0 %" in editor.formation_share_caption(100.0)
+    assert editor.window_caption(100.0).endswith("inside.")  # 3.5 widths away
+    assert editor.window_caption(130.0).endswith("outside.")  # 38.8 GeV > 10 widths = 24.95 GeV
