@@ -312,6 +312,11 @@ class BodySystem:
         self.captured_at = np.full(n, np.nan)  # t when each body was removed
         self._acc = np.zeros_like(self.x)
         self._acc_fresh = False  # _acc belongs to the current positions
+        # An outer step carried across calls (advance(carry=True)): its
+        # length, what is left of it, and whether it opened with a kick.
+        self._open_h = 0.0
+        self._open_left = 0.0
+        self._open_kicked = False
         self.history = None  # a History, if attached: sampled during advance()
         self.hydro = None  # a blackhole_sph.Gas, if the bodies are gas
 
@@ -336,7 +341,7 @@ class BodySystem:
     def _kick(self, dt):
         """Mutual Newtonian pull over dt (in each body's proper time, dtau = dt (1-2/r)/E)."""
         if not np.any(self.mass[self.alive] > 0.0):
-            return
+            return False
         if not self._acc_fresh:
             v = self.w
             if self.hydro is not None:
@@ -359,14 +364,28 @@ class BodySystem:
         _apply_kick(self.x, self.w, self._acc, live, dt, dtau)
         if self.hydro is not None:
             self.hydro.heat(dtau[live], live)
+        return True
 
-    def advance(self, duration):
+    def advance(self, duration, carry=False):
         """Advance all bodies by `duration` of coordinate time.
 
         Each outer step: half a kick of mutual gravity, every body along its
         exact geodesic (own RK4 steps), half a kick (Strang splitting: second
         order in the mutual pull, fourth order in the hole's).
+
+        carry=False: the outer steps fit into this call, so at its end the
+        velocities belong to the positions. Each call then costs at least one
+        evaluation of the mutual pull, however short it is.
+
+        carry=True (the module's frames): an outer step is OUTER_STEP long
+        whatever the length of the call, and one that is not finished when
+        the call ends is carried on by the next (see _advance_carried). The
+        scheme is the same; only the places where it is interrupted differ.
         """
+        if carry:
+            self._advance_carried(duration)
+            return
+        self._close_open_step()
         end = self.t + duration
         while end - self.t > 1e-12:
             h = min(self.OUTER_STEP, end - self.t)
@@ -389,6 +408,61 @@ class BodySystem:
             self._acc_fresh = False
             self._kick(0.5 * h)
             self.t += h
+            if self.history is not None and self.t >= self.history.next_time() - 1e-9:
+                self.history.record(self)
+
+    def _close_open_step(self):
+        """End an outer step left open by advance(carry=True) where it stands.
+
+        The step opened with half a kick for its full length but has drifted
+        only part of it: the closing kick makes the two add up to the time
+        drifted (first order for this one step; it happens only when a
+        carried advance is followed by one that is not).
+        """
+        if self._open_left > 0.0:
+            if self._open_kicked:
+                self._kick(0.5 * self._open_h - self._open_left)
+            self._open_left = 0.0
+
+    def _advance_carried(self, duration):
+        """advance() with outer steps that run on across calls.
+
+        The same kick-drift-kick steps, each OUTER_STEP long (as set when the
+        step opens). The drift of a step is exact along the geodesics, so it
+        may be cut anywhere: at the end of a call and at the history's sample
+        times, without evaluating the mutual pull again. A call shorter than
+        OUTER_STEP therefore costs a drift only. Between the opening and the
+        closing kick of a step, w is half a kick behind the positions (what
+        the display and the history then read); the positions are those of
+        the scheme. A step that opened while no body had mass (the star
+        still whole) closes without a kick as well.
+        """
+        end = self.t + duration
+        while end - self.t > 1e-12:
+            if self._open_left <= 0.0:
+                self._open_h = self._open_left = float(self.OUTER_STEP)
+                self._open_kicked = self._kick(0.5 * self._open_h)
+            d = min(self._open_left, end - self.t)
+            if self.history is not None:
+                d = min(d, self.history.next_time() - self.t)
+            _drift(
+                self.x,
+                self.w,
+                self.alive,
+                d,
+                self.ETA,
+                self.MAX_STEP,
+                2.0 * (1.0 + CAPTURE_MARGIN),
+                self.t,
+                self.captured_at,
+            )
+            self._acc_fresh = False
+            self.t += d
+            self._open_left -= d
+            if self._open_left <= 1e-12 * self._open_h:
+                if self._open_kicked:
+                    self._kick(0.5 * self._open_h)
+                self._open_left = 0.0
             if self.history is not None and self.t >= self.history.next_time() - 1e-9:
                 self.history.record(self)
 

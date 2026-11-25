@@ -272,6 +272,35 @@ downloaded data and are skipped without it).
       real CERN Open Data dimuon events through the same display, tau decays
       through the rho and a1, an "end view" camera preset.
 
+## Black-hole speed (2026-11-25)
+
+Claude under override (geodesics.py, kerr_bodies.py, blackholemodule.step);
+review the integrator change. Measured headless and in an offscreen GL
+context at 1920 x 1080: NOT YET SEEN IN THE REAL WINDOW.
+
+- [x] Kick steps run on across frames (`advance(carry=True)`, used by the
+      module for clouds of more than 20 bodies; every other caller and the
+      tests use the old path). Before, each frame closed its step and paid
+      for a force evaluation, and so did each history sample. Force
+      evaluations over 1200 frames: "Star torn apart" 1187 -> 379 (spin 0.6:
+      2376 -> 335), "Gas ring" 750 -> 484 over 500, "with gas" 1422 -> 1350
+      over 1500 (a frame there is already one step long). Mean step 11 ->
+      1.5 ms in "Star torn apart". Outcomes unchanged: 97.0% / 97.1% eaten,
+      96.1% with spin, with gas 1.4% / 1.2% by t = 12490 M.
+- [x] Display: the picture is traced at half resolution while the camera
+      moves and for 0.2 s after (MOVING_SCALE, MOVING_HOLD in
+      blackholemodule.py; set MOVING_SCALE = 1 to switch it off). A camera
+      move re-traces every pixel: 15-16 ms at full resolution, 7-9 at half.
+- Whole frame, "with gas", camera still: step 5.5 + sprites and GPU 5 ms.
+- [ ] The lower limit on OUTER_STEP (options.outer_step) lets the kick step
+      exceed the gas's Courant time: down to 1% of the step at pericentre in
+      "Star torn apart" before this change (4% after), 11-14% "with gas".
+      Not changed; honouring it would cost several evaluations a frame there.
+- [ ] Between kicks w is half a kick behind x (display and history read it).
+- N-body "Star torn by a black hole": step 0.4 ms, render 4-7 ms offscreen;
+  no frame-time problem found there. If it looks slow, it is the scene's
+  pace (slow motion), not the frame rate.
+
 ## Verification and fixes (2026-11-23)
 
 An independent review of modules 1-4, the home screen and save/load found

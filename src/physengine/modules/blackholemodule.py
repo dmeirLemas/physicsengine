@@ -15,6 +15,7 @@ hover inside the horizon, r = 2M; there the view is black).
   blackhole_images.py; scenes, blackhole_scenes.py.
 """
 
+import time
 from dataclasses import replace
 
 import numpy as np
@@ -103,6 +104,13 @@ STAR_PEAK = 4.0  # brightness of the whole star's centre, in disc peak brightnes
 MARKER_POINTS = 160  # dots of the tidal-radius circle
 MARKER_RGB = (1.0, 0.3, 0.15)
 MARKER_PX = 1.3
+# Display: while the camera moves, every frame needs a new ray trace of the
+# whole picture (about 20 ms at 1920 x 1080 on the integrated GPU, measured
+# 2026-11-25; a still camera reuses the last one). The picture is then traced
+# at this fraction of the resolution, and at the chosen one again once the
+# camera has been still for MOVING_HOLD seconds.
+MOVING_SCALE = 0.5
+MOVING_HOLD = 0.2
 # Light-travel time: the emission times are iterated (at most DELAY_PASSES
 # times a frame) until no image would move by more than this angle on the
 # sky, in radians (1e-4: a fifteenth of a pixel at 720 lines).
@@ -316,6 +324,8 @@ class BlackHoleModule(BaseModule):
         self.star_draw_scale = 1.0  # the whole star is drawn this many times too large
         self.star_seen_r = None  # [M] where the star (or its debris) is seen now
         self.notice = ""  # shown in the Bodies window (a scenario that could not be opened)
+        self.last_view = None  # the camera of the last frame, and when it last moved
+        self.view_moved_at = -np.inf
 
     # ---------------------------------------------------------------- bodies
 
@@ -477,6 +487,11 @@ class BlackHoleModule(BaseModule):
     def step(self, dt):
         b = self.bodies
         massive = b.alive & (b.mass > 0.0)
+        duration = dt * self.speed * self._pace()
+        # A cloud of particles (the star, the gas): its kick steps run on
+        # across frames (advance(carry=True)), so a frame shorter than the
+        # kick interval does not pay for a force evaluation of its own.
+        carry = b.n > 20
         if b.n > 20 and massive.sum() > 1:
             # Kick interval for the star's self-gravity: 1% of the dynamical
             # time of the cloud as it now is, sqrt(R^3 / m). It grows as the
@@ -493,12 +508,12 @@ class BlackHoleModule(BaseModule):
                     self.gas.cooling = 0.0
                     self.gas.disc_aspect = RING_ASPECT if self.gas_cooling == "Fast" else 0.0
                 step = min(step, self.gas.time_step)  # the gas's Courant time
-            b.OUTER_STEP = float(
-                np.clip(step, self.options.outer_step, self.options.outer_step_max)
-            )
-        duration = dt * self.speed * self._pace()
+            # The lower limit is no longer than a frame: before the steps
+            # were carried, a frame was the longest step there could be.
+            shortest = min(self.options.outer_step, duration)
+            b.OUTER_STEP = float(np.clip(step, shortest, self.options.outer_step_max))
         with few_threads():
-            b.advance(duration)
+            b.advance(duration, carry=carry)
             if self.intact_star is not None:
                 self.intact_star.update(b, duration)
 
@@ -877,6 +892,14 @@ class BlackHoleModule(BaseModule):
         view = camera.view()
         cam_pos = -view[:3, :3].T @ view[:3, 3]
         self.camera_distance = float(np.linalg.norm(cam_pos))
+        now = time.perf_counter()
+        view_key = (view.tobytes(), camera.fov, camera.aspect_ratio)
+        if self.last_view is not None and view_key != self.last_view:
+            self.view_moved_at = now
+        self.last_view = view_key
+        scale = RESOLUTIONS[self.resolution]
+        if now - self.view_moved_at < MOVING_HOLD:
+            scale = min(scale, MOVING_SCALE)
         sprites = None
         if self.camera_distance > R_HORIZON:
             with few_threads():
@@ -886,7 +909,7 @@ class BlackHoleModule(BaseModule):
             camera,
             self.settings(),
             exposure=self.exposure,
-            scale=RESOLUTIONS[self.resolution],
+            scale=scale,
             sprites=sprites,
         )
 

@@ -312,6 +312,13 @@ class KerrBodySystem:
         self.t = 0.0
         self.history = None
         self.hydro = None  # a blackhole_sph.Gas, if the bodies are gas
+        # An outer step carried across calls (advance(carry=True)): its
+        # length, what is left of it, whether it opened with a kick, and a
+        # closing half kick still to be applied with the next opening one.
+        self._open_h = 0.0
+        self._open_left = 0.0
+        self._open_kicked = False
+        self._owed = 0.0
         self.r_capture = kerr.horizon(self.a) * (1.0 + CAPTURE_MARGIN)
 
     @property
@@ -353,7 +360,7 @@ class KerrBodySystem:
         """
         live = self.alive & (self.mass > 0.0)
         if live.sum() < 2:
-            return
+            return False
         from physengine.modules.geodesics import newtonian_mutual
 
         x = self.x
@@ -373,6 +380,7 @@ class KerrBodySystem:
             self.hydro.heat(dtau, idx)
         v = v + acc[idx] * dtau[:, None]
         self.st[idx], self.consts[idx] = states_from_local(x[idx], v, self.a)
+        return True
 
     def local_velocity(self, i):
         """ZAMO-frame velocity of body i (world axes)."""
@@ -411,7 +419,60 @@ class KerrBodySystem:
             w = world_velocity(real, back.consts, self.a)
             yield np.where(held[:, None], x_now, x), np.where(held[:, None], w_now, w)
 
-    def advance(self, duration):
+    def _close_open_step(self):
+        """End an outer step left open by advance(carry=True) where it stands (see BodySystem)."""
+        if self._open_left > 0.0:
+            if self._open_kicked:
+                self._kick(0.5 * self._open_h - self._open_left)
+            self._open_left = 0.0
+
+    def _advance_carried(self, duration):
+        """advance() with outer steps that run on across calls (see BodySystem._advance_carried).
+
+        The two half kicks that meet between one step and the next are
+        applied as one kick: the positions are the same for both.
+        """
+        end = self.t + duration
+        while end - self.t > 1e-12:
+            if self._open_left <= 0.0:
+                h = float(self.OUTER_STEP)
+                # (the closing half kick of the step before, if it is still owed)
+                self._open_kicked = self._kick(0.5 * h + self._owed)
+                self._owed = 0.0
+                self._open_h = self._open_left = h
+            d = min(self._open_left, end - self.t)
+            if self.history is not None:
+                d = min(d, self.history.next_time() - self.t)
+            _drift(
+                self.st,
+                self.consts,
+                self.alive,
+                d,
+                self.a,
+                self.ETA,
+                self.MAX_STEP,
+                self.r_capture,
+                self.t,
+                self.captured_at,
+            )
+            self.t += d
+            self._open_left -= d
+            if self._open_left <= 1e-12 * self._open_h:
+                self._open_left = 0.0
+                if self._open_kicked:
+                    if end - self.t > 1e-12:
+                        self._owed = 0.5 * self._open_h  # with the next step's opening kick
+                    else:
+                        self._kick(0.5 * self._open_h)
+            if self.history is not None and self.t >= self.history.next_time() - 1e-9:
+                self.history.record(self)
+
+    def advance(self, duration, carry=False):
+        """Advance by `duration`; carry=True as in geodesics.BodySystem.advance."""
+        if carry:
+            self._advance_carried(duration)
+            return
+        self._close_open_step()
         end = self.t + duration
         while end - self.t > 1e-12:
             h = min(self.OUTER_STEP, end - self.t)
