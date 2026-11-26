@@ -10,7 +10,7 @@ from physengine.core.module import BaseModule
 
 
 class Window:
-    def __init__(self, W, H, registry: dict, title="TEST") -> None:
+    def __init__(self, W, H, registry: dict, title="TEST", director=None) -> None:
         self.pause_flag = True
         self.W = W
         self.H = H
@@ -28,6 +28,14 @@ class Window:
         self.pending_module_name: str | None = None
         # True when the pending switch is a reset that keeps the spec values.
         self.pending_keep_params = False
+        # Spec values the pending module starts with (request_switch).
+        self.pending_params: dict = {}
+        # An optional object that runs the app by itself, such as a guided
+        # tour (core/tour.py). Every frame the app calls its
+        # update(window, frame_time); keys go to its on_key(window, key,
+        # action, modifiers) first (True: the key was used), and camera moves
+        # by the user are reported to its on_view_input().
+        self.director = director
 
         self.time_scale = 1.0
         self.step_count = 0
@@ -72,6 +80,8 @@ class Window:
         self.imgui_.mouse_drag_event(x, y, dx, dy)
         if not imgui.get_io().want_capture_mouse:
             # Left drag orbits; right or middle drag pans.
+            if self.director is not None:
+                self.director.on_view_input()
             states = self.window.mouse_states
             if states.right or states.middle:
                 self.camera.pan(dx, dy)
@@ -81,6 +91,8 @@ class Window:
     def on_mouse_scroll(self, x, y):
         self.imgui_.mouse_scroll_event(x, y)
         if not imgui.get_io().want_capture_mouse:
+            if self.director is not None:
+                self.director.on_view_input()
             self.camera.zoom(y)
 
     def on_mouse_position(self, x, y, dx, dy):
@@ -110,6 +122,9 @@ class Window:
 
         self.imgui_.key_event(key, action, modifiers)
         if not imgui.get_io().want_capture_keyboard:
+            director = self.director
+            if director is not None and director.on_key(self, key, action, modifiers):
+                return
             if key == SPACE and action == ACTION_PRESS:
                 self.pause_flag = not self.pause_flag
 
@@ -133,9 +148,12 @@ class Window:
 
             while not self.window.is_closing:
                 if self.pending_module_name is not None:
-                    self.switch(self.pending_module_name, self.pending_keep_params)
+                    self.switch(
+                        self.pending_module_name, self.pending_keep_params, self.pending_params
+                    )
                     self.pending_module_name = None
                     self.pending_keep_params = False
+                    self.pending_params = {}
 
                 curr_time, frame_time = self.timer.next_frame()
 
@@ -227,6 +245,9 @@ class Window:
                     self.pending_module_name = wanted_module
                     self.pending_keep_params = False
 
+                if self.director is not None:
+                    self.director.update(self, frame_time)
+
                 self.imgui_.end_frame()
                 self.window.swap_buffers()
 
@@ -258,7 +279,16 @@ class Window:
             self.pending_module_name = self.active_module_name
             self.pending_keep_params = False
 
-    def switch(self, class_name, keep_params=False):
+    def request_switch(self, class_name, params=None):
+        """Switch to a module on the next frame (also to the active one, rebuilt from
+        its defaults). params: spec values it starts with, set before its setup()."""
+        if class_name not in self.registry:
+            raise Exception("Class to switch does not exist in the registry.")
+        self.pending_module_name = class_name
+        self.pending_keep_params = False
+        self.pending_params = dict(params or {})
+
+    def switch(self, class_name, keep_params=False, params=None):
         if class_name not in self.registry:
             raise Exception("Class to switch does not exist in the registry.")
 
@@ -270,6 +300,7 @@ class Window:
                     for spec in self.active_module.specs
                 }
             self.active_module.teardown()
+        kept.update(params or {})
 
         self.active_module = self.registry[class_name]()
         self.camera.reset()

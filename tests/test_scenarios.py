@@ -578,5 +578,5 @@ def test_home_screen_keeps_an_unreadable_file_out(save_dir, text, expected):
 
 def test_home_screen_reports_a_file_that_disappeared(save_dir):
     home = HomeModule()
-    assert home.open_saved("NbodyModule", "nbody", "gone") is False
+    assert home.open_saved("Massive bodies", "nbody", "gone") is False
     assert home.switch_requested is None and ("nbody", "gone") in home.errors

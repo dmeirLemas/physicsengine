@@ -19,8 +19,10 @@ import time
 from dataclasses import replace
 
 import numpy as np
+from imgui_bundle import imgui
 
 from physengine.core.module import BaseModule
+from physengine.core.scalebar import draw_scale_bar
 from physengine.core.spec import Choice, SliderFloat
 from physengine.modules import kerr, scenario_files
 from physengine.modules.blackhole_editor import (
@@ -308,6 +310,7 @@ class BlackHoleModule(BaseModule):
         self.renderer = BlackHoleRenderer()
         self.window = BodiesWindow(self)
         self.camera_distance = 40.0  # last seen, for diagnostics
+        self.camera = None  # set in render(), for the scale bar
         self.pending_view = True  # set the camera on the first frame
         self.rays = None  # RayTable for the current camera distance
         self.bb_table = blackbody_table()
@@ -886,6 +889,7 @@ class BlackHoleModule(BaseModule):
         self.renderer.setup(ctx)
 
     def render(self, ctx, camera):
+        self.camera = camera
         if self.pending_view:
             camera.distance, camera.pitch = self.options.view
             self.pending_view = False
@@ -917,6 +921,19 @@ class BlackHoleModule(BaseModule):
 
     def draw_ui(self):
         self.window.update()
+        if self.camera is not None and self.camera_distance > R_HORIZON:
+            # Exact only for things at the hole's distance, perpendicular to the
+            # line of sight; the picture is lensed, so the bar is not at other places.
+            W, H = imgui.get_io().display_size
+            draw_scale_bar(
+                self.camera,
+                W,
+                H,
+                GM_SUN_KM * self.hole_mass * 1000.0,
+                "M",
+                "at the hole's distance, unlensed",
+                distance=self.camera_distance,
+            )
 
     def discard_edits(self):
         forget_added()
@@ -932,7 +949,8 @@ class BlackHoleModule(BaseModule):
         b = self.bodies
         extra = ""
         if b.n > 20:
-            e = energy(b.x[b.alive], b.w[b.alive])
+            # Kerr bodies carry their conserved energy; b.w is dx/dt there, not dx/dtau.
+            e = b.consts[b.alive, 0] if self.spin > 0.0 else energy(b.x[b.alive], b.w[b.alive])
             star = self.intact_star
             if star is not None:
                 m_sun, radius_km, _ = STARS[self.star]

@@ -181,7 +181,7 @@ def breit_wigner_formation(sqrt_s, m0, width):
     maximum is the width). PDG 2024, review "Resonances" (Breit-Wigner
     line shape); the formation cross section of e+ e- -> Z follows this
     shape near the peak (PDG 2024, Z boson review), with the absolute scale
-    left out here (see particle_custom.py, "Collisions")."""
+    left out here."""
     if width <= 0.0:
         return 1.0 if sqrt_s == m0 else 0.0
     half = 0.5 * width

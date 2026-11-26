@@ -3,8 +3,10 @@ from copy import deepcopy
 from functools import partial
 
 import numpy as np
+from imgui_bundle import imgui
 
 from physengine.core.module import BaseModule
+from physengine.core.scalebar import AU_M, draw_scale_bar
 from physengine.core.spec import Choice, SliderFloat
 from physengine.modules import scenario_files
 from physengine.modules.nbody_binary import (
@@ -131,6 +133,8 @@ def compactness(nb):
     if nb.N < 2:
         return 0.0
     _, r, m = pair_timescales(nb.pos, nb.vel, nb.mass, G, nb.debris)
+    if len(r) == 0:  # every body is debris: no pairs
+        return 0.0
     return float(np.max(G * m / (C_AU_PER_YEAR**2 * np.maximum(r, 1e-300))))
 
 
@@ -143,7 +147,8 @@ def timescale_1pn(pos, vel, mass, debris=None):
     tau, r, m = pair_timescales(pos, vel, mass, G, debris)
     strength = G * m / (C_AU_PER_YEAR**2 * np.maximum(r, 1e-300))
     factor = np.clip(np.sqrt(STRONG_FIELD / np.maximum(strength, 1e-300)), FINE_1PN, 1.0)
-    return float(np.min(tau * factor))
+    # No pairs left when every body is debris.
+    return float(np.min(tau * factor)) if len(tau) else np.inf
 
 
 def make_integrator(gravity=NEWTON):
@@ -436,7 +441,7 @@ def advance_step(integrator, state, dt, on_contact, rehold=None, on_meet=None):
     `on_contact(pair)` is called when two bodies touch. It returns the state
     to continue with (a merger replaces the state), or None to end the step
     there. Returns False if the step was cut short by STEP_BUDGET (the
-    state is then less than dt further).
+    state is then less than dt further, by integrator.last_time).
 
     The pairs held by the integrator (hold_pairs, called before this) move
     with their centres of mass during the substeps: both members are given
@@ -521,6 +526,7 @@ def advance_step(integrator, state, dt, on_contact, rehold=None, on_meet=None):
     if state is not None:
         settle(state)
     integrator.last_substeps = substeps
+    integrator.last_time = dt - remaining  # time integrated, less than dt if cut short
     return complete
 
 
@@ -1621,9 +1627,9 @@ class NBodyModule(BaseModule):
         return max(pace, sim_dt / MAX_SLOW_MOTION)
 
     def _hole_masses(self):
-        """Mass of each black hole, by body id."""
+        """Mass of each black hole, by body id. A hole edited to mass 0 counts as gone."""
         nb = self.nb
-        return {self.ids[k]: float(nb.mass[k]) for k in np.flatnonzero(nb.black_hole)}
+        return {self.ids[k]: float(nb.mass[k]) for k in np.flatnonzero(nb.black_hole & (nb.mass > 0.0))}
 
     def away(self):
         """The whole bodies (not debris) that are on exact orbits round a hole
@@ -1962,8 +1968,11 @@ class NBodyModule(BaseModule):
         self.slowed = not advance_step(
             self.integrator, self.nb, advanced, self._merge_contact, self._hold, self._meet
         )
-        self.elapsed += advanced
-        self.last_step_time = advanced
+        # A step cut short by STEP_BUDGET counts for the time it covered, so
+        # the clock and the bodies on exact orbits stay in step with the rest.
+        covered = self.integrator.last_time if self.slowed else advanced
+        self.elapsed += covered
+        self.last_step_time = covered
         self.step_index += 1
         self.trails.record(self.nb.pos)
         self.trails.valid[self.nb.gas] = 0  # a cloud of gas is drawn without trails
@@ -2046,6 +2055,9 @@ class NBodyModule(BaseModule):
 
     def draw_ui(self):
         self.editor.update(self.camera, G)
+        if self.camera is not None:
+            W, H = imgui.get_io().display_size
+            draw_scale_bar(self.camera, W, H, AU_M, "AU")
 
     def setup(self, ctx):
         pending = scenario_files.take_request("nbody")  # opened from the home screen

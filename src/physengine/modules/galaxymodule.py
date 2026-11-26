@@ -13,8 +13,10 @@ import time
 from functools import partial
 
 import numpy as np
+from imgui_bundle import imgui
 
 from physengine.core.module import BaseModule
+from physengine.core.scalebar import KPC_M, draw_scale_bar
 from physengine.core.spec import Choice, SliderFloat
 from physengine.modules import scenario_files
 from physengine.modules.galacy_ics import (
@@ -201,6 +203,7 @@ class GalaxyModule(BaseModule):
 
         self.renderer = GalaxyRenderer()
         self.pending_view_distance = None  # set by load()
+        self.camera = None  # set in render(), for the scale bar
         self.integrator = Integrator(
             partial(bh_acc_grouped, G=G, eps=EPS, theta=THETA, tracer_theta=TRACER_THETA)
         )
@@ -291,6 +294,7 @@ class GalaxyModule(BaseModule):
         self.step_ms = 1000.0 * (time.perf_counter() - start)
 
     def render(self, ctx, camera):
+        self.camera = camera
         if self.pending_view_distance is not None:
             camera.distance = self.pending_view_distance
             self.pending_view_distance = None
@@ -331,6 +335,9 @@ class GalaxyModule(BaseModule):
 
     def draw_ui(self):
         self.editor.update()
+        if self.camera is not None:
+            W, H = imgui.get_io().display_size
+            draw_scale_bar(self.camera, W, H, KPC_M, "kpc")
 
     def prepare_scenario(self, data):
         """Take a saved setup: it becomes the edited version of its scene.

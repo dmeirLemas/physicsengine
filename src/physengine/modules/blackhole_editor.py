@@ -136,6 +136,12 @@ class BodiesWindow:
                 )
             else:
                 incl = np.radians(settings["inclination"])
+                if m.spin > 0.0 and abs(np.cos(incl)) < 1e-6:
+                    # The Kerr coordinates are singular on the spin axis.
+                    raise ValueError(
+                        "With spin, a body cannot start exactly on the spin axis:"
+                        " choose an inclination below 90 deg."
+                    )
                 spec = at_rest(
                     name,
                     r_a,

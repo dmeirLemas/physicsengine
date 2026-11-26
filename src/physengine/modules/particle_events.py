@@ -59,6 +59,71 @@ curvature; the direction is taken as exact. Electrons radiate in the
 tracker, so their energy is taken from the calorimeter instead
 (lepton_measured). Neutral particles, where used (the visible mass of
 Z -> tau tau), are taken with their true momenta.
+
+Scenes with a forced decay chain (added 2026-11-26 under the owner's
+approval; review the physics). "B+ -> J/psi K+" and "D*+ -> D0 pi+" make
+one particle at the collision point (transverse momentum and rapidity as
+for the Z: PT_MEAN, Y_WIDTH) and force the first decays of the chain
+(_produce, `forced`) instead of drawing them from the tables; everything
+after is drawn from the tables as usual. Shown is only that chain; the
+texts give its PDG fraction (forced_fraction). The B+ (c tau 491.1 um)
+and the D0 (123.01 um) fly for their drawn lifetimes, so a millimetre or
+less. The J/psi from B+ -> J/psi K+ is polarised (decay_momenta,
+polarised_by). The D0's oscillation (particle_data.MIXING: it decays as a
+D0bar with probability 3.3e-5) is not applied to its forced decay. Measured
+mass (_measure): of everything visible that came from the B+ (mu+ mu- K+)
+or the D0 (K- pi+), each particle with its own mass, charged ones by the
+tracker model above. A charged particle that decayed in flight (a K or pi)
+is measured over its path from its start to the kink if that segment has
+the layers for it (measured_to_kink); else the event gives no mass.
+"Higgs -> 2 photons": the Higgs as in "Higgs -> 4 leptons", decaying at
+once to two photons, isotropic in its rest frame (spin 0). Each photon is
+measured with its true direction and its true energy smeared by the
+calorimeter's resolution (ECAL_A, ECAL_C, as for electrons); a photon that
+converted in the tracker still counts as the photon (photon_measured).
+Only this mode is shown: in the Standard Model 0.227% of Higgs bosons decay
+to two photons (LHC Higgs Cross Section Working Group, CERN Yellow Report 4,
+CERN-2017-002).
+
+Collisions: "e+ e- -> Z (collider scan)" (adapted 2026-11-26 from the
+deleted Custom scene, written 2026-11-23 under the owner's override; review
+the physics). Here the collision IS computed, in the following sense.
+- An electron and a positron fly at each other along the beam (z) axis
+  with equal energies E and meet at the origin at t = 0 (meeting checks
+  that their straight paths meet; along the axis the solenoid does not bend
+  them). Each event sets sqrt(s) = 2 E anew, uniformly within M_Z -+
+  SCAN_WIDTHS Gamma_Z (a scan, as if the collider were retuned for every
+  event; no beam-energy spread). sqrt(s): s = (p1 + p2)^2, the invariant
+  mass of the pair (PDG 2024, review "Kinematics"); head on with equal
+  energies sqrt(s) = 2 E exactly.
+- Formation (collide). No resonance is formed unless |sqrt(s) - M| <=
+  WINDOW_WIDTHS widths. Within that window a Z is formed with probability
+      w(sqrt(s)) = (Gamma/2)^2 / ((sqrt(s) - M)^2 + (Gamma/2)^2)
+  (particle_kinematics.breit_wigner_formation; PDG 2024, review
+  "Resonances", non-relativistic Breit-Wigner; Z: M = 91.1876 GeV, Gamma =
+  2.4952 GeV from particle_data.py). So the sqrt(s) of the collisions that
+  formed a Z traces the Breit-Wigner line shape; with sqrt(s) uniform in
+  M -+ 2 Gamma the fraction formed is atan(4) / 4 = 0.3315. STATED
+  APPROXIMATION: the absolute rate is a shape, not computed from a cross
+  section: a pair exactly at the peak always forms the Z (probability 1),
+  which a real pair would do only rarely (it would mostly pass by: the peak
+  cross section is a few tens of nanobarns). Left out: initial-state
+  radiation (which lowers the effective sqrt(s) and gives the measured line
+  shape its tail above the peak), the photon exchange and its interference
+  with the Z, and the forward-backward asymmetry.
+- The Z's four-momentum is p1 + p2 exactly: at rest, with mass sqrt(s). The
+  Breit-Wigner gives how likely each sqrt(s) is to form it, not a mass
+  drawn apart from the pair (that would break energy-momentum conservation).
+- It decays at once at the origin by its listed modes (particle_data.py:
+  e+ e-, mu+ mu-, tau+ tau-; only the charged-lepton modes are listed, so
+  Z -> nu nu and Z -> hadrons do not occur), with the angular distribution
+  1 + cos^2(theta) about the beam axis (_lepton_pair, as in the other Z
+  scenes).
+- Not formed: nothing happens in this model (other processes, such as
+  scattering through photon exchange, are not simulated); the two fly on
+  along the beam line and leave. Nothing enters the histogram.
+The histogram is of sqrt(s), which is set, not measured: of the collisions
+that formed a Z.
 """
 
 from dataclasses import dataclass, field
@@ -67,6 +132,7 @@ import numpy as np
 
 from physengine.modules.particle_data import _ANTI, A1, ISOBARS, MIXING, PARTICLES, RESONANCES, RHO
 from physengine.modules.particle_kinematics import (
+    breit_wigner_formation,
     breit_wigner_mass,
     four_momentum,
     leptonic_decay,
@@ -80,9 +146,11 @@ from physengine.modules.particle_kinematics import (
     vector_isobar_decay,
 )
 from physengine.modules.particle_material import TRACKER, TRACKER_HALF_LENGTH
-from physengine.modules.particle_tracks import TRACKER_RADIUS, C, K, Track, propagate
+from physengine.modules.particle_tracks import OUTER_Z, TRACKER_RADIUS, C, K, Track, propagate
 
-PT_MEAN = {"Z": 8.0, "J/psi": 6.0, "H": 20.0}
+# "B+" and "D*+" (added 2026-11-26): chosen display values, not
+# measurements (high enough that most of their tracks reach across the tracker).
+PT_MEAN = {"Z": 8.0, "J/psi": 6.0, "H": 20.0, "B+": 8.0, "D*+": 6.0}
 Y_WIDTH = 1.2
 # Soft particles: measured averages for proton-proton collisions at 13 TeV:
 # about 6 charged particles per unit of pseudorapidity (CMS Collaboration
@@ -101,6 +169,9 @@ MIN_LAYERS = 3  # fewer points than this do not give a curvature
 ECAL_A, ECAL_C = 0.028, 0.003
 MAX_GENERATIONS = 6
 Z_STAR_MIN = 12.0  # GeV: lowest Z* mass kept (as in the experiments' selections)
+WINDOW_WIDTHS = 10.0  # a pair forms a resonance only within this many widths of its mass
+SCAN_WIDTHS = 2.0  # the e+ e- scan draws sqrt(s) within M_Z -+ this many widths
+BEAM_START = 0.75  # m: where the e+ e- beams are drawn from (C x 2.5 ns, the playback's lead-in)
 
 
 @dataclass
@@ -113,7 +184,17 @@ class Event:
     # How it was made, for the close-up diagram: (incoming a, incoming b,
     # what they form, text), see MECHANISMS.
     mechanism: str = ""
-    beam_energy: float = 6.5  # TeV per proton
+    # The two beam particles (names in particle_data.PARTICLES): the first
+    # flies in from -z, the second from +z.
+    beams: tuple = ("p", "p")
+    beam_energy: float = 6.5  # TeV per beam particle
+    # How event.masses were obtained, for the texts: "tracker" (the model
+    # tracker, electrons from the calorimeter), "calorimeter" (photons), or
+    # "beams" (sqrt(s), set by the beams, not measured).
+    measurement: str = "tracker"
+    # e+ e- -> Z only: the collision record of collide() (sqrt_s, within,
+    # probability, formed); None for the other scenes.
+    formation: dict | None = None
     real: bool = False  # a recorded event, not a generated one
     duration: float = 0.0  # ns until the last particle has stopped or left
     # (label, value) pairs measured in this event, e.g. ("mu+ mu-", 91.3)
@@ -121,16 +202,8 @@ class Event:
     in_histogram: bool = True  # False: the masses are shown but not entered (same-sign pairs)
     note: str = ""  # a remark for the commentary (e.g. why no mass was measured)
     error: str = ""  # set when the event could not be made: the reason, for the display
-    # A custom event (particle_custom.py): particles placed by the user, no
-    # collision. Its tracks without a parent have the origin "placed".
-    custom: bool = False
-    # The masses that go into the histogram, if not all of `masses` (custom
-    # events: only those of the parent the histogram is about).
-    entered: list | None = None
-    # Custom events: one dict per pair of entries set to collide
-    # (particle_custom.collide): entries, names, resonance, sqrt_s,
-    # within (10 widths), probability, formed.
-    collisions: list = field(default_factory=list)
+
+
 
 
 def _decay_time(particle, p4, rng):
@@ -153,21 +226,27 @@ def _produce(
     generation=0,
     origin="collision",
     quick=False,
+    forced=None,
 ):
     """Add `name` to the event, follow it, and let it decay in turn.
 
     quick: for events made only for the histogram. A muon from the collision
-    is then not followed through the detector (its measurement uses only
-    its momentum and starting point, see `measured`); it gets a track of
-    one point.
+    or from a decay is then not followed through the detector (its
+    measurement uses only its momentum and starting point, see `measured`);
+    it gets a track of one point.
+    forced: {name: daughters}: the first particle of that name in this chain
+    that decays does so into `daughters`, instead of a mode drawn from its
+    table (the scenes with a forced chain, module docstring). Passed on to
+    the daughters without the entry used.
     """
     particle = PARTICLES[name]
-    if quick and particle.kind == "muon" and parent < 0:
+    if quick and particle.kind == "muon" and (parent < 0 or origin == "decay"):
         p4 = np.array(p4, dtype=float)
         start = np.array(vertex, dtype=float)
         event.tracks.append(
-            Track(name, p4, start[None, :], np.array([t0]), "exit", p4.copy(), hits=[])
-        )
+            Track(name, p4, start[None, :], np.array([t0]), "exit", p4.copy(),
+                  parent=parent, hits=[], origin=origin)
+        )  # fmt: skip
         return
     lifetime = _decay_time(particle, p4, rng)
     track, photons = propagate(
@@ -198,12 +277,17 @@ def _produce(
         return
     if track.end != "decay" or generation >= MAX_GENERATIONS:
         return
-    # A neutral B, Bs or D0 may have oscillated: it then decays by its
-    # antiparticle's table (decay_flavour). The track keeps the name it was made with.
-    proper_time = lifetime * particle.mass / p4[0]
-    decays_as = decay_flavour(name, proper_time, rng)
-    probabilities, modes = PARTICLES[decays_as].modes()
-    daughters = modes[rng.choice(len(modes), p=probabilities)]
+    if forced and name in forced:
+        # A forced decay: no draw from the table, and no oscillation.
+        decays_as, daughters = name, tuple(forced[name])
+        forced = {k: v for k, v in forced.items() if k != name}
+    else:
+        # A neutral B, Bs or D0 may have oscillated: it then decays by its
+        # antiparticle's table (decay_flavour). The track keeps the name it was made with.
+        proper_time = lifetime * particle.mass / p4[0]
+        decays_as = decay_flavour(name, proper_time, rng)
+        probabilities, modes = PARTICLES[decays_as].modes()
+        daughters = modes[rng.choice(len(modes), p=probabilities)]
     # The parent's momentum where it decays (turned by the field, and
     # lowered by ionisation, on the way). A resonance keeps the mass it was
     # made with; anything else has its own.
@@ -224,6 +308,8 @@ def _produce(
             index,
             generation + 1,
             "decay",
+            quick,
+            forced,
         )
 
 
@@ -302,7 +388,7 @@ def _b_to_jpsi_k(event, name, p4, parent):
     kaon and nothing else), else None. Told from the recoil: (B - J/psi)^2 is
     a kaon's mass squared only in the two-body decay (in J/psi K pi, J/psi
     K pi pi, J/psi K K, J/psi pi pi it takes a continuum of values). Works
-    for the B's of events and of the Custom window alike."""
+    for the Bs of events."""
     if name != "J/psi" or parent < 0 or event.tracks[parent].name not in _B_MESONS:
         return None
     b = event.tracks[parent]
@@ -383,7 +469,7 @@ def decay_momenta(name, parent_p4, daughters, rng, polarised_by=None):
 
 
 # particle_data.ISOBARS by (parent, daughters sorted): a decay typed in another
-# order (the Custom window) finds its sub-channels too.
+# order finds its sub-channels too.
 _ISOBARS = {(parent, tuple(sorted(d))): entry for (parent, d), entry in ISOBARS.items()}
 
 
@@ -448,7 +534,10 @@ def _from_pt_y(m, pt, y, phi):
 
 
 def _resonance(name, rng):
-    """Four-momentum of a Z or J/psi with a Breit-Wigner mass (see the module docstring)."""
+    """Four-momentum of a particle made at the collision point (a Z, J/psi, B+ or
+    D*+): transverse momentum and rapidity as in the module docstring, and
+    for one with a width a Breit-Wigner mass (breit_wigner_mass returns the
+    mass itself for width 0)."""
     particle = PARTICLES[name]
     m = breit_wigner_mass(particle.mass, particle.width, rng)
     pt = rng.exponential(PT_MEAN[name])
@@ -581,6 +670,225 @@ def _strange(event, field_strength, rng):
         )
 
 
+def forced_fraction(parent, daughters):
+    """PDG branching fraction of `parent` -> `daughters` as listed in particle_data
+    (in any order of the daughters), 0 if it is not listed."""
+    wanted = sorted(daughters)
+    return float(sum(b for b, d in PARTICLES[parent].decays if sorted(d) == wanted))
+
+
+def _distance_text(metres):
+    if metres >= 0.01:
+        return f"{metres * 100:.3g} cm"
+    if metres >= 1e-4:
+        return f"{metres * 1000:.2g} mm"
+    return f"{metres * 1e6:.2g} micrometres"
+
+
+# The forced chains: (particle made at the collision point, its forced
+# decays in order, the particle whose products are measured, their label).
+CHAINS = {
+    "B+ -> J/psi K+": ("B+", (("B+", ("J/psi", "K+")), ("J/psi", ("mu+", "mu-"))), "B+", "mu+ mu- K+"),
+    "D*+ -> D0 pi+": ("D*+", (("D*+", ("D0", "pi+")), ("D0", ("K-", "pi+"))), "D0", "K- pi+"),
+}  # fmt: skip
+
+_ENDED = {
+    "shower": "it interacted in the material first",
+    "exit": "it left first",
+    "stopped": "it stopped",
+    "lost": "it kept curling in the magnet",
+}
+
+
+def _chain(scene, event, field_strength, rng, quick=False):
+    """One event of a scene with a forced decay chain (CHAINS, module docstring)."""
+    name, decays, measured_name, label = CHAINS[scene]
+    _produce(
+        event, name, _resonance(name, rng), np.zeros(3), 0.0, field_strength, rng,
+        quick=quick, forced=dict(decays),
+    )  # fmt: skip
+    first = event.tracks[0]
+    steps = [
+        f"{parent} -> {' '.join(d)} ({100.0 * forced_fraction(parent, d):.4g}%)"
+        for parent, d in decays
+    ]
+    shown = (
+        "Only this chain is shown: " + ", then ".join(steps)
+        + " of all decays (PDG); the decays after it are drawn from the tables"
+    )  # fmt: skip
+    index = next((i for i, t in enumerate(event.tracks) if t.name == measured_name), None)
+    if index is None or event.tracks[index].end != "decay":
+        track = event.tracks[0 if index is None else index]
+        why = _ENDED.get(track.end, "it was lost")
+        event.headline = f"Generated: a {name} that did not decay inside the detector"
+        event.note = f"No mass: the {measured_name} did not decay inside the detector ({why}). {shown}"
+        return
+    flight = float(np.linalg.norm(event.tracks[index].points[-1] - event.tracks[index].points[0]))
+    if name == measured_name:
+        p = float(np.linalg.norm(first.p4[1:]))
+        event.headline = (
+            f"Generated: a {name} ({p:.3g} GeV) flies {_distance_text(flight)}, then decays"
+            f" -> {' '.join(decays[0][1])}; {decays[1][0]} -> {' '.join(decays[1][1])}"
+        )
+    else:
+        event.headline = (
+            f"Generated: a {name} (mass {float(mass(first.p4)):.6g} GeV) decays at once"
+            f" -> {' '.join(decays[0][1])}; the {decays[1][0]} flies {_distance_text(flight)},"
+            f" then decays -> {' '.join(decays[1][1])}"
+        )
+    result, why = _measure(event, index, label, field_strength, rng)
+    if result is None:
+        event.note = f"{why}. {shown}"
+    else:
+        event.masses = [result]
+        event.note = shown
+
+
+def _higgs_photons(event, field_strength, rng, quick=False):
+    """H -> gamma gamma (module docstring), measured by the calorimeter model."""
+    higgs = _from_pt_y(
+        M_HIGGS,
+        rng.exponential(PT_MEAN["H"]),
+        rng.normal(0.0, Y_WIDTH),
+        rng.uniform(0.0, 2.0 * np.pi),
+    )
+    # Spin 0: isotropic in the Higgs's rest frame.
+    for q in two_body_decay(higgs, 0.0, 0.0, rng):
+        _produce(event, "gamma", q, np.zeros(3), 0.0, field_strength, rng, quick=quick)
+    event.bosons.append(
+        {"name": "H", "p4": higgs, "daughters": ("gamma", "gamma"), "from": "the collision"}
+    )
+    event.mechanism = "H"
+    event.measurement = "calorimeter"
+    event.headline = "Generated: a Higgs boson decays at once -> gamma gamma"
+    shown = (
+        "Only this mode is shown: in the Standard Model 0.227% of Higgs bosons decay to two"
+        " photons (LHC Higgs Cross Section WG, CERN-2017-002)"
+    )
+    photons = [i for i, t in enumerate(event.tracks) if t.parent < 0 and t.name == "gamma"]
+    momenta = [photon_measured(event, i, rng) for i in photons]
+    if len(photons) == 2 and all(q is not None for q in momenta):
+        event.masses = [("gamma gamma", float(mass(momenta[0] + momenta[1])))]
+        event.note = shown
+    else:
+        event.note = f"No mass: a photon did not reach the calorimeter. {shown}"
+
+
+def _z_scan(event, field_strength, rng, quick=False):
+    """e+ e- -> Z at a sqrt(s) near the Z mass ("Collisions" in the module
+    docstring). quick: the Z's decay products are not made (the histogram is
+    of sqrt(s))."""
+    z = PARTICLES["Z"]
+    m_e = PARTICLES["e-"].mass
+    root_s = rng.uniform(z.mass - SCAN_WIDTHS * z.width, z.mass + SCAN_WIDTHS * z.width)
+    energy = 0.5 * root_s
+    pz = np.sqrt(energy * energy - m_e * m_e)
+    electron = np.array([energy, 0.0, 0.0, pz])  # flies in from -z
+    positron = np.array([energy, 0.0, 0.0, -pz])  # from +z
+    start_e, start_p = np.array([0.0, 0.0, -BEAM_START]), np.array([0.0, 0.0, BEAM_START])
+    met = meeting(start_e, electron, start_p, positron)
+    # Symmetric starts and equal speeds: they meet at the origin (the clock
+    # is set so that this is t = 0).
+    if met is None or not np.allclose(met[0], 0.0, atol=1e-12):
+        raise RuntimeError("the e- and e+ beams do not meet at the origin")
+    record = collide(electron, positron, "Z", rng)
+    event.formation = record
+    event.beams = ("e-", "e+")
+    event.beam_energy = energy / 1000.0
+    event.measurement = "beams"
+    root_s = record["sqrt_s"]
+    chance = f"probability {record['probability']:.3g} at this sqrt(s)"
+    if not record["formed"]:
+        # They fly on along the beam line, unbent (no transverse momentum).
+        for name, p4 in (("e-", electron), ("e+", positron)):
+            direction = np.sign(p4[3])
+            z_end = np.linspace(0.0, direction * OUTER_Z, 12)
+            points = np.stack([np.zeros(12), np.zeros(12), z_end], 1)
+            times = np.abs(z_end) / (pz / energy * C)
+            event.tracks.append(
+                Track(name, p4.copy(), points, times, "exit", p4.copy(), hits=[], origin="beam")
+            )
+            event.duration = max(event.duration, float(times[-1]))
+        event.headline = (
+            f"Generated: e- e+ at sqrt(s) = {root_s:.4f} GeV: no Z formed ({chance});"
+            " they fly on along the beam line"
+        )
+        event.note = (
+            f"No Z was formed at sqrt(s) = {root_s:.4f} GeV ({chance}): nothing enters the"
+            " histogram"
+        )
+        return
+    total = electron + positron  # the Z: at rest, mass sqrt(s)
+    probabilities, modes = z.modes()
+    daughters = tuple(modes[rng.choice(len(modes), p=probabilities)])
+    if not quick:
+        _lepton_pair(event, total, daughters, field_strength, rng, True)
+    event.bosons.append(
+        {"name": "Z", "p4": total, "daughters": daughters, "from": "the e- e+ annihilation"}
+    )
+    event.mechanism = "e+ e- -> Z"
+    event.masses = [("sqrt(s)", root_s)]
+    event.headline = (
+        f"Generated: e- e+ at sqrt(s) = {root_s:.4f} GeV form a Z ({chance}),"
+        f" which decays at once -> {' '.join(daughters)}"
+    )
+    event.note = (
+        "The rate is a shape, not a cross section (probability 1 at the peak); initial-state"
+        " radiation, the photon exchange and the forward-backward asymmetry are left out;"
+        " only the Z's charged-lepton modes are listed"
+    )
+
+
+def meeting(start_a, p4a, start_b, p4b):
+    """(point [m], time [ns]) where two particles starting at start_a and
+    start_b with four-momenta p4a and p4b meet on straight paths, or None if
+    their paths do not meet: one start point, or both on one line parallel
+    to the beam axis, each flying towards the other (or at rest)."""
+    a, b = np.asarray(start_a, dtype=float), np.asarray(start_b, dtype=float)
+    d = b - a
+    length = float(np.linalg.norm(d))
+    if length < 1.0e-9:
+        return a.copy(), 0.0
+    u = d / length
+    if np.hypot(u[0], u[1]) > 1.0e-9:
+        return None  # off the beam axis the solenoid bends charged tracks
+    speeds = []
+    for p4, towards in ((p4a, u), (p4b, -u)):
+        p = np.asarray(p4[1:], dtype=float)
+        size = float(np.linalg.norm(p))
+        if size == 0.0:
+            speeds.append(0.0)
+            continue
+        if float(p @ towards) / size < 1.0 - 1.0e-9:
+            return None
+        speeds.append(size / float(p4[0]))  # beta
+    if speeds[0] + speeds[1] == 0.0:
+        return None  # both at rest, apart
+    when = length / ((speeds[0] + speeds[1]) * C)
+    return a + speeds[0] * C * when * u, when
+
+
+def collide(p4a, p4b, resonance, rng):
+    """Does a pair with four-momenta p4a, p4b form `resonance`? (module
+    docstring, "Collisions"). A dict: sqrt_s, within (WINDOW_WIDTHS),
+    probability (the Breit-Wigner weight, 0 outside the window) and formed.
+    Draws a random number only within the window."""
+    particle = PARTICLES[resonance]
+    sqrt_s = float(mass(np.asarray(p4a, dtype=float) + np.asarray(p4b, dtype=float)))
+    within = abs(sqrt_s - particle.mass) <= WINDOW_WIDTHS * particle.width
+    probability = (
+        float(breit_wigner_formation(sqrt_s, particle.mass, particle.width)) if within else 0.0
+    )
+    formed = bool(within and rng.uniform() < probability)
+    return {
+        "resonance": resonance,
+        "sqrt_s": sqrt_s,
+        "within": bool(within),
+        "probability": probability,
+        "formed": formed,
+    }
+
+
 @dataclass(frozen=True)
 class Hist:
     """The histogram of a scene: what is measured and over what range."""
@@ -603,6 +911,19 @@ SCENES = {
     "Strange particles": ("K0_S and Lambda fly centimetres, then decay to two tracks", Hist("pi+ pi- mass [GeV]", 0.40, 0.60, 50, ((0.497611, "K0S"),))),
     "Busy collision": ("A Z -> mu+ mu- among the debris of a collision", Hist("mu+ mu- mass [GeV]", 60.0, 120.0, 60, _Z_LINE)),
     "Higgs -> 4 leptons": ("A Higgs boson decays to two Z bosons, each to two leptons", Hist("four-lepton mass [GeV]", 105.0, 145.0, 40, ((125.25, "Higgs"),))),
+    # Added 2026-11-26 (module docstring: forced chains, H -> gamma gamma, Collisions).
+    "B+ -> J/psi K+": ("A B+ meson flies a millimetre or so, then decays to a J/psi and a K+; the J/psi to two muons", Hist("mu+ mu- K+ mass [GeV]", 5.0, 5.6, 60, ((PARTICLES["B+"].mass, "B+"),))),
+    "D*+ -> D0 pi+": ("A D*+ decays at once to a D0 and a slow pi+; the D0 flies a fraction of a millimetre, then decays to K- pi+", Hist("K- pi+ mass [GeV]", 1.70, 2.03, 66, ((PARTICLES["D0"].mass, "D0"),))),
+    "Higgs -> 2 photons": ("A Higgs boson decays to two photons (0.227% of its decays in the Standard Model: only this mode is shown)", Hist("gamma gamma mass [GeV]", 110.0, 140.0, 60, ((M_HIGGS, "Higgs"),))),
+    "e+ e- -> Z (collider scan)": (
+        "An electron and a positron collide head on near the Z mass; a Z forms with the Breit-Wigner probability",
+        Hist(
+            "sqrt(s) of the collisions that formed a Z [GeV]",
+            PARTICLES["Z"].mass - SCAN_WIDTHS * PARTICLES["Z"].width,
+            PARTICLES["Z"].mass + SCAN_WIDTHS * PARTICLES["Z"].width,
+            40, ((PARTICLES["Z"].mass, "Z"),),
+        ),
+    ),
     # Recorded by CMS in 2011 (particle_opendata.py). The histograms are of
     # opposite-charge pairs; same-charge pairs are shown but not entered.
     "Real data: Z -> mu+ mu-": ("A real collision recorded by CMS: two muons, selected as a Z candidate", Hist("mu+ mu- mass [GeV]", 60.0, 120.0, 60, _Z_LINE)),
@@ -614,11 +935,7 @@ SCENES = {
             ((3.0969, "J/psi"), (3.6861, "psi'"), (9.4603, "Upsilon"), (91.1876, "Z")), True,
         ),
     ),
-    # Particles placed by the user (particle_custom.py). Its histogram depends
-    # on the setup (particle_custom.histogram_for); a setup may have none.
-    "Custom": ("Particles you place yourself: fire them through the detector, or let a parent decay", None),
 }  # fmt: skip
-CUSTOM = "Custom"
 
 # What usually happens between the protons when such a particle is made, for
 # the close-up diagram and the text: (incoming, incoming, what they form,
@@ -630,6 +947,10 @@ MECHANISMS = {
     "J/psi": ("gluon", "gluon", "c cbar", "Illustration (not simulated): a J/psi is mostly made when two gluons, one from each proton, fuse into a charm quark and antiquark, which bind."),
     "H": ("gluon", "gluon", "H", "Illustration (not simulated): a Higgs boson is mostly made when two gluons, one from each proton, fuse through a loop of top quarks."),
     "soft": ("quark/gluon", "quark/gluon", "strings", "Illustration (not simulated): quarks and gluons knocked out of the protons pull new quark pairs out of the vacuum; these bind into hadrons, some of them strange."),
+    "B+": ("gluon", "gluon", "b bbar", "Illustration (not simulated): bottom quarks are mostly made as a quark-antiquark pair from gluons, one from each proton; the anti-b binds with an up quark into the B+ (the b ends up in another hadron, not shown)."),
+    "D*+": ("gluon", "gluon", "c cbar", "Illustration (not simulated): charm quarks are mostly made as a quark-antiquark pair from gluons, one from each proton; the c binds with a down antiquark into the D*+ (the anti-c ends up in another hadron, not shown)."),
+    # Not an illustration: the formation is computed from sqrt(s) (_z_scan).
+    "e+ e- -> Z": ("electron", "positron", "Z", "Computed: the electron and the positron annihilate into a Z, with the Breit-Wigner probability at this sqrt(s) (a shape, not a cross section; the photon exchange is left out)."),
 }  # fmt: skip
 
 
@@ -707,9 +1028,9 @@ class MassHistogram:
         return self._summary
 
 
-def quick_masses(scene, count, field_strength, rng, custom=None):
+def quick_masses(scene, count, field_strength, rng):
     """Masses of `count` more events for the histogram, by the cheapest way that
-    gives the same distribution as the events shown. `custom`: as in generate.
+    gives the same distribution as the events shown.
 
     Recorded events: their masses come straight from the data (no tracking);
     only opposite-charge pairs are entered, so fewer than `count` may come
@@ -730,7 +1051,7 @@ def quick_masses(scene, count, field_strength, rng, custom=None):
         return [float(m) for m in mass(momenta[rows, 0] + momenta[rows, 1])]
     out = []
     for _ in range(count):
-        out += histogram_masses(generate(scene, field_strength, rng, quick=True, custom=custom))
+        out += histogram_masses(generate(scene, field_strength, rng, quick=True))
     return out
 
 
@@ -738,8 +1059,6 @@ def histogram_masses(event):
     """The masses of an event that go into the scene's histogram."""
     if not event.in_histogram:
         return []
-    if event.entered is not None:
-        return list(event.entered)
     return [m for _, m in event.masses]
 
 
@@ -777,19 +1096,12 @@ def _real_event(scene, event, field_strength, rng):
         )
 
 
-def generate(scene, field_strength, rng, quick=False, custom=None):
+def generate(scene, field_strength, rng, quick=False):
     """One event of `scene` in a solenoid of `field_strength` tesla.
 
     quick: only the masses are wanted (see quick_masses); the event is then
-    not complete enough to be displayed. custom: the setup of the "Custom"
-    scene (particle_custom.Setup); if not given, the current one.
+    not complete enough to be displayed.
     """
-    if scene == CUSTOM:
-        # Imported here: particle_custom builds on this module.
-        from physengine.modules import particle_custom
-
-        setup = particle_custom.current() if custom is None else custom
-        return particle_custom.generate_custom(setup, field_strength, rng, quick)
     event = Event()
     if scene.startswith("Real data"):
         _real_event(scene, event, field_strength, rng)
@@ -826,6 +1138,17 @@ def generate(scene, field_strength, rng, quick=False, custom=None):
     elif scene == "Higgs -> 4 leptons":
         _higgs(event, field_strength, rng, quick)
         event.mechanism = "H"
+    elif scene in CHAINS:
+        # These scenes measure their masses themselves (_measure), and set the note.
+        _chain(scene, event, field_strength, rng, quick)
+        event.mechanism = CHAINS[scene][0]
+        return event
+    elif scene == "Higgs -> 2 photons":
+        _higgs_photons(event, field_strength, rng, quick)
+        return event
+    elif scene == "e+ e- -> Z (collider scan)":
+        _z_scan(event, field_strength, rng, quick)
+        return event
     else:
         raise ValueError(f"unknown scene {scene}")
     event.masses = reconstruct(scene, event, field_strength, rng)
@@ -1007,3 +1330,131 @@ def lepton_measured(event, index, field_strength, rng):
     energy *= max(1.0 + sigma * rng.normal(), 0.05)
     direction = track.p4[1:] / np.linalg.norm(track.p4[1:])
     return np.array([energy, *(energy * direction)])
+
+
+def family_of(event, index):
+    """Indices of track `index` and everything that came from it."""
+    family = {index}
+    for i, t in enumerate(event.tracks):  # parents always come before children
+        if t.parent in family:
+            family.add(i)
+    return family
+
+
+def photon_measured(event, index, rng):
+    """Measured four-momentum of the photon that is track `index`, or None if
+    nothing of it reached the calorimeter (no shower in its family).
+
+    Its true direction, and its true energy smeared by the calorimeter's
+    resolution sqrt((ECAL_A / sqrt(E))^2 + ECAL_C^2) (as for electrons,
+    lepton_measured). A photon that converted in the tracker still counts as
+    the photon: its pair's showers are taken as its own.
+    """
+    track = event.tracks[index]
+    if not any(event.tracks[i].shower is not None for i in family_of(event, index)):
+        return None
+    energy = float(track.p4[0])
+    sigma = np.sqrt((ECAL_A / np.sqrt(energy)) ** 2 + ECAL_C**2)
+    return track.p4 * max(1.0 + sigma * rng.normal(), 0.05)
+
+
+def measured_to_kink(track, field_strength, rng):
+    """Three-momentum of a charged track that decayed in flight, as the tracker
+    measures it over the segment from its start to the kink (its decay
+    point), or None if that segment cannot be measured.
+
+    As measured() (true momentum at the start, curvature smeared by the
+    resolution), with the projected length L of the fit cut at the kink:
+    the largest distance across the field from the start reached by the
+    points of the path inside the tracker, and at most the lever arm of an
+    undecayed track (lever_arm). The rule for fewer than MIN_LAYERS layers
+    is momentum_resolution's.
+    """
+    particle = PARTICLES[track.name]
+    if particle.charge == 0 or track.end != "decay" or len(track.points) < 2:
+        return None
+    p = track.p4[1:]
+    start = track.points[0]
+    pts = track.points
+    inside = (np.hypot(pts[:, 0], pts[:, 1]) < TRACKER_RADIUS) & (
+        np.abs(pts[:, 2]) < TRACKER_HALF_LENGTH
+    )
+    if not inside.any():
+        return None
+    reach = float(np.max(np.hypot(pts[inside, 0] - start[0], pts[inside, 1] - start[1])))
+    lever = min(lever_arm(start, p, particle.charge, field_strength), reach)
+    pt, total = float(np.hypot(p[0], p[1])), float(np.linalg.norm(p))
+    sigma = momentum_resolution(pt, total, particle.mass, lever, field_strength, particle.charge)
+    if sigma is None:
+        return None
+    curvature = max(abs(1.0 + sigma * rng.normal()), 0.05)  # as in measured()
+    return p / curvature
+
+
+def _measure(event, index, label, field_strength, rng):
+    """((label, mass), "") of everything visible that came from track `index`,
+    as measured, or (None, why not).
+
+    The visible products: all descendants that did not decay, except
+    neutrinos and except what a product turned into in the material (as in
+    visible_tracks), each with its own mass. Charged ones by the tracker
+    model (measured), electrons by lepton_measured, photons by
+    photon_measured, neutral hadrons with their true momenta. A charged
+    particle that decayed in flight is measured itself over its path to the
+    kink (measured_to_kink), and what came of it is left out; if that
+    segment has too few layers, or any product cannot be measured, there is
+    no mass. A neutral one that decayed (the J/psi) counts through its products.
+    """
+    tracks = event.tracks
+    parent = tracks[index]
+    family = family_of(event, index) - {index}
+    final, kinked, covered = [], {}, set()
+    for i in sorted(family):  # parents always come before children
+        t = tracks[i]
+        if t.parent in covered:
+            covered.add(i)
+            continue
+        if t.end == "decay":
+            if PARTICLES[t.name].charge == 0:
+                continue  # counted through its products
+            q = measured_to_kink(t, field_strength, rng)
+            if q is None:
+                return None, (
+                    f"No mass for the {parent.name}: its {t.name} decayed in flight"
+                    " before the tracker could measure it"
+                )
+            kinked[i] = q
+            final.append(i)
+            covered.add(i)
+            continue
+        if PARTICLES[t.name].kind != "neutrino" and t.origin not in ("radiated", "conversion"):
+            final.append(i)
+    neutrinos = any(
+        PARTICLES[tracks[i].name].kind == "neutrino" for i in family if i not in covered
+    )
+    if len(final) < 2:
+        return None, f"No mass for the {parent.name}: too little of its decay is visible"
+    total = np.zeros(4)
+    for i in final:
+        t = tracks[i]
+        particle = PARTICLES[t.name]
+        if i in kinked:
+            q4 = four_momentum(particle.mass, kinked[i])
+        elif particle.kind == "electron":
+            q4 = lepton_measured(event, i, field_strength, rng)
+        elif particle.charge != 0:
+            q = measured(t, field_strength, rng)
+            q4 = None if q is None else four_momentum(particle.mass, q)
+        elif particle.kind == "photon":
+            q4 = photon_measured(event, i, rng)
+        else:
+            q4 = t.p4  # neutral hadrons: true momenta
+        if q4 is None:
+            return None, (
+                f"No mass for the {parent.name}: its {t.name} could not be measured"
+                " (it left too close to the beam line, or started outside the tracker)"
+            )
+        total = total + q4
+    if neutrinos:
+        label = f"the visible products of the {parent.name}"
+    return (label, float(mass(total))), ""

@@ -693,6 +693,8 @@ def count_fades(m):
     return calls
 
 
+# The scene gets its pace back by giving up pieces that do not fit in STEP_BUDGET.
+@pytest.mark.step_budget
 @pytest.mark.parametrize("trigger", ["star dropped", "planet torn on its orbit"])
 def test_scene_returns_to_its_pace_after_a_tear_near_a_small_hole(trigger):
     # A 10 solar-mass hole with a planet on a circular orbit at 1 AU, in the

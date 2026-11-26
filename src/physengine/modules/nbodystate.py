@@ -112,7 +112,9 @@ def min_timescale(pos, vel, mass, G, debris=None):
         return np.inf
     if debris is None:
         debris = np.zeros(len(mass), dtype=np.bool_)
-    return float(np.min(pair_timescales(pos, vel, mass, G, debris)[0]))
+    tau = pair_timescales(pos, vel, mass, G, debris)[0]
+    # No pairs left when every body is debris.
+    return float(np.min(tau)) if len(tau) else np.inf
 
 
 @numba.njit(cache=True)
@@ -404,6 +406,7 @@ class Integrator:
         self.acc_cache = None
         self.last_level = 0  # deepest substep level k used by the last step
         self.last_substeps = 0  # substeps computed by the last step
+        self.last_time = 0.0  # time covered by the last step (set by nbodymodule.advance_step)
         self.debris = None  # the state's debris flags during advance(), if it has any
         # nbody_binary.Held, if the force treats some pairs as single bodies:
         # their members do not touch each other.

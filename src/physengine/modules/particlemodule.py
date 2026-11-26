@@ -19,15 +19,14 @@ fluctuations, Gaussian multiple scattering by the Highland formula,
 bremsstrahlung, parametrised showers); the measurement (true momenta smeared
 by the resolution the Gluckstern formula gives for the field and the
 tracker's size; nothing is fitted to the paths drawn).
-Not simulated: the collision itself; see the module docstring of
-particle_events.py. The incoming protons and the close-up diagram are an
+Not simulated: the proton-proton collision itself; see the module docstring
+of particle_events.py. The incoming protons and the close-up diagram are an
 illustration of the usual production mechanism, shown for generated events
-only. For recorded events only CMS's measurement of the two muons is real;
-their paths are recomputed in this module's simplified detector.
-
-The "Custom" event type shows particles the user places (particle_custom.py,
-edited in the window of particle_editor.py): such an event is not a
-collision, no protons are drawn for it, and its texts say so.
+only. The exception is the e+ e- -> Z scan: there the beams are an electron
+and a positron (Event.beams), and whether they form a Z is computed from
+sqrt(s) (a Breit-Wigner shape, not a cross section). For recorded events
+only CMS's measurement of the two muons is real; their paths are recomputed
+in this module's simplified detector.
 
 Threads: the next event to show is prepared in a background thread, and so
 are the events added to the histogram in bulk; the main thread only collects
@@ -42,16 +41,15 @@ import numpy as np
 from imgui_bundle import imgui
 
 from physengine.core.module import BaseModule
+from physengine.core.scalebar import draw_scale_bar
 from physengine.core.spec import Choice, SliderFloat
-from physengine.modules import particle_custom, particle_opendata, scenario_files
+from physengine.modules import particle_opendata
 from physengine.modules.particle_data import ABOUT, PARTICLES
-from physengine.modules.particle_editor import CustomWindow, forget_draft, set_draft
 from physengine.modules.particle_events import (
-    CUSTOM,
     MECHANISMS,
+    SCAN_WIDTHS,
     SCENES,
     Event,
-    Hist,
     MassHistogram,
     generate,
     histogram_masses,
@@ -73,8 +71,6 @@ from physengine.modules.starfield import Starfield
 
 DEFAULT_SCENE = "Z -> mu+ mu-"
 LEAD_IN = 2.5  # ns before the collision at which playback starts (protons flying in)
-CUSTOM_LEAD_IN = 0.4  # ns before a custom event's particles start (there are no protons)
-NO_HISTOGRAM = Hist("", 0.0, 1.0, 1)  # stands in where a custom setup has no histogram
 MAX_SHOWN = 30.0  # ns of an event that are played (light reaches the outer muon station in 24)
 HOLD_SECONDS = 1.0  # the finished event stays this long
 FADE_SECONDS = 0.5  # and then fades over this long
@@ -159,10 +155,25 @@ def play_end(event):
     return min(event.duration, MAX_SHOWN)
 
 
-def proton_speed_deficit(beam_tev):
-    """1 - v/c of a proton of `beam_tev` TeV: 1 / (2 gamma^2) for gamma >> 1."""
-    gamma = beam_tev * 1000.0 / M_PROTON
+def beam_speed_deficit(beam_tev, m=M_PROTON):
+    """1 - v/c of a beam particle of mass m [GeV] and energy `beam_tev` TeV:
+    1 / (2 gamma^2) for gamma >> 1."""
+    gamma = beam_tev * 1000.0 / m
     return 0.5 / gamma**2
+
+
+def energy_text(tev):
+    """A beam energy given in TeV, in TeV from 1 TeV up and in GeV below."""
+    return f"{tev:g} TeV" if tev >= 1.0 else f"{tev * 1000.0:.4g} GeV"
+
+
+def beam_words(beams):
+    """'Two protons' or 'An electron and a positron', from Event.beams."""
+    a, b = (ABOUT.get(name, (name, ""))[0] for name in beams)
+    if a == b:
+        return f"Two {a}s"
+    article = lambda word: "An" if word[0] in "aeiou" else "A"  # noqa: E731
+    return f"{article(a)} {a} and {article(b).lower()} {b}"
 
 
 def narrate(event):
@@ -170,50 +181,46 @@ def narrate(event):
     if event.error or not event.tracks:
         return []  # nothing happened: the panel says why
     tracks = event.tracks
-    if event.custom:
-        # No protons and no collision: only what the user put there.
-        count = sum(1 for t in tracks if t.parent < 0)
-        what = (
-            "particle starts where you placed it"
-            if count == 1
-            else "particles start where you placed them"
+    beam_mass = PARTICLES[event.beams[0]].mass
+    deficit = beam_speed_deficit(event.beam_energy, beam_mass)
+    log = [
+        (
+            -LEAD_IN,
+            f"{beam_words(event.beams)} fly in, {energy_text(event.beam_energy)} each:"
+            f" slower than light by {deficit * 299792458.0:.2g} m/s",
         )
-        log = [(0.0, f"{count} {what} (by hand: this is not a collision)")]
-    else:
-        deficit = proton_speed_deficit(event.beam_energy)
-        log = [
-            (
-                -LEAD_IN,
-                f"Two protons fly in, {event.beam_energy:g} TeV each:"
-                f" slower than light by {deficit * 299792458.0:.2g} m/s",
-            )
-        ]
-    if event.custom:
-        pass
-    elif event.real:
+    ]
+    formation = event.formation
+    if event.real:
         # Only what was measured: no production mechanism is asserted.
         log.append((0.0, "The protons collide. Of all that came out, the file holds the two muons"))
+    elif formation is not None and not formation["formed"]:
+        log.append(
+            (
+                0.0,
+                f"They meet at sqrt(s) = {formation['sqrt_s']:.4f} GeV: no Z formed (probability"
+                f" {formation['probability']:.3g} at this sqrt(s)). Nothing else is simulated:"
+                " they fly on along the beam line",
+            )
+        )
+    elif formation is not None:
+        log.append(
+            (
+                0.0,
+                f"{MECHANISMS[event.mechanism][3]} Here sqrt(s) = {formation['sqrt_s']:.4f} GeV:"
+                f" probability {formation['probability']:.3g}",
+            )
+        )
     elif event.mechanism in MECHANISMS:
         log.append((0.0, MECHANISMS[event.mechanism][3]))
     elif event.tracks:
-        log.append((0.0, "The protons collide"))
+        log.append((0.0, "The protons collide" if event.beams == ("p", "p") else "They collide"))
     for i, t in enumerate(tracks):
         particle = PARTICLES[t.name]
         when = float(t.times[-1])
         children = [c.name for c in tracks if c.parent == i and c.origin == "decay"]
         energy = float(t.p4[0])
-        if t.end == "decay" and children and event.custom:
-            # Distances are from where the particle itself started.
-            distance = float(np.linalg.norm(t.points[-1] - t.points[0]))
-            far = f"{distance * 100:.0f} cm" if distance >= 0.01 else f"{distance * 1000:.2g} mm"
-            if particle.width > 0.0:
-                how = f"(mass {float(mass(t.p4)):.4g} GeV) decays at once"
-            elif distance == 0.0:
-                how = "decays where it is"
-            else:
-                how = f"decays {far} from where it started"
-            log.append((when, f"{t.name} {how} -> {' '.join(children)}"))
-        elif t.end == "decay" and children and particle.width == 0.0:
+        if t.end == "decay" and children and particle.width == 0.0:
             distance = float(np.linalg.norm(t.points[-1]))
             far = f"{distance * 100:.0f} cm" if distance >= 0.01 else f"{distance * 1000:.2g} mm"
             log.append((when, f"{t.name} decays {far} from the collision -> {' '.join(children)}"))
@@ -230,8 +237,17 @@ def narrate(event):
     end = play_end(event)
     for label, m in event.masses[:2]:
         # A recorded pair's label says who measured it; a generated one is
-        # "measured" by the resolution model of particle_events.
-        prefix = "mass of" if event.real else "measured (model tracker): mass of"
+        # "measured" by the resolution model of particle_events; sqrt(s) of
+        # the e+ e- scan is set by the beams, not measured.
+        if event.measurement == "beams":
+            log.append((end, f"{label} = {m:.5g} GeV (set by the beam energies, not measured)"))
+            continue
+        if event.real:
+            prefix = "mass of"
+        elif event.measurement == "calorimeter":
+            prefix = "measured (model calorimeter): mass of"
+        else:
+            prefix = "measured (model tracker): mass of"
         log.append((end, f"{prefix} {label} = {m:.4g} GeV"))
     if event.note:
         log.append((end, event.note))
@@ -318,56 +334,40 @@ class ParticleModule(BaseModule):
         self.download_error = ""
         self.selected = None  # ("track", index) or ("boson", index)
         self.press = None  # where the mouse went down, for telling a click from a drag
-        # The Custom event type: the setup that runs (never changed in place;
-        # the threads keep the one they started with), a number that goes up
-        # with every change of it (results made for an older one are dropped),
-        # and whether an event of the newest setup is still to be shown.
-        self.custom = particle_custom.current()
-        self.version = 0
-        self.custom_dirty = False  # the setup changed and no event of it is being made yet
-        self.custom_waiting = False  # an event of the new setup is being made
-        self.notice = ""  # why a saved scenario could not be opened
-        self.editor = CustomWindow(self)
-        self.lead_in = LEAD_IN
         # Remade in setup(): the app sets the event type after construction.
-        self.histogram = MassHistogram(self._histogram() or NO_HISTOGRAM)
+        self.histogram = MassHistogram(self._histogram())
 
     # ---------------------------------------------------------------- events
 
     def _histogram(self):
-        """The scene's Hist; None for a custom setup without a parent to measure."""
-        if self.scene_name == CUSTOM:
-            return particle_custom.histogram_for(self.custom)
+        """The scene's Hist."""
         return SCENES[self.scene_name][1]
 
     def _missing_data(self):
         name = self.scene_name
         return name in particle_opendata.FILES and not particle_opendata.available(name)
 
-    def _make(self, field, rng, custom=None):
+    def _make(self, field, rng):
         """An event to show. Never raises: an event that cannot be made (an
         unreadable data file, a failure in the generation) comes back empty
         with the reason in `error`, which the panel shows."""
         if self._missing_data():
             return Event(headline="These recorded events have not been downloaded yet")
         try:
-            if self.scene_name == CUSTOM:
-                return generate(self.scene_name, field, rng, custom=custom or self.custom)
             return generate(self.scene_name, field, rng)
         except Exception as error:  # noqa: BLE001 (shown to the user, see draw_ui)
             return Event(
                 headline="This event could not be made",
                 error=f"{type(error).__name__}: {error}",
-                custom=self.scene_name == CUSTOM,
             )
 
     def _prepare_next(self):
         """Generate the next event in the background, so that the display does not
         stall while a busy event is being followed through the detector."""
-        field, rng, custom = self.field, self.rng.spawn(1)[0], self.custom
+        field, rng = self.field, self.rng.spawn(1)[0]
 
         def work():
-            self.next_event = (field, self._make(field, rng, custom))
+            self.next_event = (field, self._make(field, rng))
 
         self.next_event = None
         self.worker = threading.Thread(target=work, daemon=True)
@@ -376,17 +376,13 @@ class ParticleModule(BaseModule):
     def new_event(self):
         if self.worker is not None:
             self.worker.join()  # ends: _make cannot raise, and every path is bounded
-        if self.custom_dirty:
-            self.next_event = None  # prepared for a custom setup that has changed since
-        self.custom_dirty = self.custom_waiting = False
         if self.next_event is None:
             self.next_event = (self.field, self._make(self.field, self.rng))
         self.shown_field, self.event = self.next_event
         self.waiting_for_data = self._missing_data() and not self.event.tracks
         self.log = narrate(self.event)
         self.end = play_end(self.event)
-        self.lead_in = CUSTOM_LEAD_IN if self.event.custom else LEAD_IN
-        self.now = -self.lead_in
+        self.now = -LEAD_IN
         self.finished_at = None
         self.selected = None
         self.pending_upload = True
@@ -395,83 +391,10 @@ class ParticleModule(BaseModule):
             self.events_seen += 1
         self._prepare_next()
 
-    # ------------------------------------------------------- custom setups
-
-    def apply_custom(self, setup):
-        """Run the custom `setup` from now on (called by the editor window).
-
-        Raises ValueError, with nothing changed, if it cannot be generated.
-        The histogram starts again; the event of the new setup is made in the
-        background and shown when it is ready (_follow_custom), so a large
-        setup does not stall the window while it is being edited.
-        """
-        particle_custom.set_current(setup)
-        self.custom = particle_custom.current()
-        self.version += 1
-        self.cancel_fill()
-        self.fill_error = ""
-        self.histogram = MassHistogram(self._histogram() or NO_HISTOGRAM)
-        self.events_seen = 0
-        self.custom_dirty = True
-
-    def _follow_custom(self):
-        """Main thread, every frame: once the setup has changed, make an event of the
-        new one (when the thread is free) and show it as soon as it is there."""
-        if self.custom_dirty and (self.worker is None or not self.worker.is_alive()):
-            self.custom_dirty = False
-            self.custom_waiting = True
-            self._prepare_next()  # drops what was prepared for the old setup
-        elif self.custom_waiting and self.next_event is not None:
-            self.new_event()
-
-    def scenario(self):
-        """The custom setup that is running and the field, for scenario_files."""
-        return {
-            "scene_name": CUSTOM,
-            "field": float(self.field),
-            "setup": particle_custom.to_dict(self.custom),
-        }
-
-    def prepare_scenario(self, data):
-        """Take a saved scenario (kind "particles"): the Custom event type with the
-        saved setup and field. Raises ValueError, with nothing changed, if
-        `data` is not one."""
-        if not isinstance(data, dict):
-            raise ValueError("a particle scenario must be a dictionary")
-        if data.get("scene_name", CUSTOM) != CUSTOM:
-            raise ValueError("only the Custom event type can be saved and opened")
-        value = data.get("field", self.field)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("the magnet's field must be a number")
-        if not 0.5 <= value <= 6.0:  # the range of the Magnet slider
-            raise ValueError("the magnet's field must be between 0.5 and 6 tesla")
-        setup = particle_custom.from_dict(data.get("setup"))
-        particle_custom.set_current(setup)
-        set_draft(setup)
-        self.scene_name = CUSTOM
-        self.field = float(value)
-        self.custom = particle_custom.current()
-
-    def load_scenario(self, data):
-        """Open a saved scenario while the module runs (the editor's Load button)."""
-        was_custom = self.scene_name == CUSTOM
-        self.prepare_scenario(data)
-        if was_custom:
-            self.apply_custom(self.custom)
-        else:
-            self.reset_requested = True
-
-    def discard_edits(self):
-        """Full reset: the custom setup goes back to its default."""
-        particle_custom.reset()
-        forget_draft()
-
     # ---------------------------------------------------- filling in bulk
 
     def request_fill(self, count):
         """Ask for `count` more events in the histogram (made in the background)."""
-        if self._histogram() is None:
-            return  # a custom setup that measures no mass
         self.fill_error = ""
         self.to_fill += count
         with self.fill_lock:
@@ -485,24 +408,18 @@ class ParticleModule(BaseModule):
     def _start_filler(self):
         scene, rng = self.scene_name, self.rng.spawn(1)[0]
         chunk = FILL_CHUNK if scene in particle_opendata.FILES else 1
-        # A custom setup may change while the thread runs: it keeps the one it
-        # started with, stops when a newer one is applied, and tags its
-        # results so that those made for an older setup are dropped.
-        custom, version = self.custom, self.version
-        extra = {"custom": custom} if scene == CUSTOM else {}
-
         def work():
             try:
-                while not self.fill_cancel.is_set() and self.version == version:
+                while not self.fill_cancel.is_set():
                     with self.fill_lock:
                         count = min(self.fill_wanted, chunk)
                         self.fill_wanted -= count
                     if count <= 0:
                         return
-                    masses = quick_masses(scene, count, self.field, rng, **extra)
-                    self.fill_results.append((count, masses, version))
+                    masses = quick_masses(scene, count, self.field, rng)
+                    self.fill_results.append((count, masses))
             except Exception as error:  # noqa: BLE001 (shown to the user)
-                self.fill_results.append((0, f"{type(error).__name__}: {error}", version))
+                self.fill_results.append((0, f"{type(error).__name__}: {error}"))
 
         self.filler = threading.Thread(target=work, daemon=True)
         self.filler.start()
@@ -511,9 +428,7 @@ class ParticleModule(BaseModule):
         """Main thread: take what the filling thread has made into the histogram,
         and (re)start the thread if there is work and it is not running."""
         while self.fill_results:
-            count, result, version = self.fill_results.popleft()
-            if version != self.version:
-                continue  # made for a custom setup that has changed since
+            count, result = self.fill_results.popleft()
             if isinstance(result, str):
                 self.fill_error = result
                 self.cancel_fill()
@@ -535,15 +450,17 @@ class ParticleModule(BaseModule):
             t1s.append(np.atleast_1d(tb))
             colors.append(np.tile([*rgb, width], (len(np.atleast_2d(a)), 1)))
 
-        # The two protons coming in along the beam line (a negative width:
-        # shown only where they have just been), and the flash where they meet.
-        custom = self.event.custom  # no protons and no collision to draw
+        # The two beam particles (Event.beams: protons, or the e- and e+ of
+        # the scan) coming in along the beam line (a negative width: shown
+        # only where they have just been), and the flash where they meet
+        # (none where an e+ e- pair formed nothing).
         times = np.linspace(-LEAD_IN, 0.0, 40)
-        for side in (-1.0, 1.0) if not custom else ():
+        for side in (-1.0, 1.0):
             z = side * C * -times
             pts = np.stack([np.zeros_like(z), np.zeros_like(z), z], 1)
             add(pts[:-1], times[:-1], pts[1:], times[1:], PROTON_COLOR, -4.0)
-        if self.event.tracks and not custom:
+        formation = self.event.formation
+        if self.event.tracks and (formation is None or formation["formed"]):
             for k in range(12):
                 angle = 2.0 * np.pi * k / 12
                 tip = 0.22 * np.array([np.cos(angle), np.sin(angle), 0.5 * np.sin(3 * angle)])
@@ -577,16 +494,12 @@ class ParticleModule(BaseModule):
                 tangent = np.array([-where[1], where[0], 0.0])
                 tangent /= np.linalg.norm(tangent)
                 add(where - 0.12 * tangent, t, where + 0.12 * tangent, t, (1.0, 0.35, 0.25), 4.0)
-            if track.end == "decay" and (particle.width == 0.0 or custom) and len(track.points) > 1:
+            if track.end == "decay" and particle.width == 0.0 and len(track.points) > 1:
                 # Where it decayed: a bright dot.
                 where, t = track.points[-1], track.times[-1]
                 add(where, t, where + np.array([0.0, 0.0, 0.004]), t, (1.0, 1.0, 1.0), 3.5)
-            elif custom and len(track.points) == 1 and track.parent < 0:
-                # A particle placed at rest: a dot in its colour where it sits.
-                where, t = track.points[0], track.times[0]
-                add(where, t, where + np.array([0.0, 0.0, 0.004]), t, particle.color, 4.0)
         if not starts:
-            # Nothing to draw at all (a custom event of neutral particles that are hidden).
+            # Nothing to draw at all (only neutral particles, and they are hidden).
             add(np.zeros(3), -1.0e6, np.zeros(3), -1.0e6, (0.0, 0.0, 0.0), 0.0)
         return (
             np.concatenate(starts),
@@ -599,14 +512,7 @@ class ParticleModule(BaseModule):
     # ------------------------------------------------------------- lifecycle
 
     def setup(self, ctx):
-        pending = scenario_files.take_request("particles")  # opened from the home screen
-        if pending is not None:
-            try:
-                self.prepare_scenario(pending)
-            except Exception as error:  # nothing may escape setup(): it would end the app
-                self.notice = f"Could not open the saved scenario: {error}"
-        self.custom = particle_custom.current()
-        self.histogram = MassHistogram(self._histogram() or NO_HISTOGRAM)
+        self.histogram = MassHistogram(self._histogram())
         self.renderer.setup(ctx)
         self.background.setup(ctx)
         self.new_event()
@@ -621,8 +527,8 @@ class ParticleModule(BaseModule):
         if self.finished_at is None:
             self.finished_at = time.perf_counter()
         elif time.perf_counter() - self.finished_at > HOLD_SECONDS + FADE_SECONDS:
-            # (else: still being prepared; or about to be remade for a changed custom setup)
-            if self.next_event is not None and not (self.custom_dirty or self.custom_waiting):
+            # (else: still being prepared)
+            if self.next_event is not None:
                 self.new_event()
 
     def render(self, ctx, camera):
@@ -742,15 +648,15 @@ class ParticleModule(BaseModule):
                 at = camera.world_to_screen((0.0, radius, 0.0), W, H)
                 if at is not None:
                     draw_list.add_text((at[0] + 4.0, at[1] - 14.0), dim, text)
-        if self.now < 0.0 and not self.event.custom:
-            # The incoming protons.
-            for side in (-1.0, 1.0):
+        if self.now < 0.0:
+            # The incoming beam particles: the first from -z, the second from +z.
+            for side, name in zip((-1.0, 1.0), self.event.beams, strict=True):
                 at = camera.world_to_screen((0.0, 0.0, side * C * -self.now), W, H)
                 if at is not None:
                     draw_list.add_text(
                         (at[0] + 8.0, at[1] - 16.0),
                         imgui.get_color_u32((*PROTON_COLOR, 1.0)),
-                        f"proton  {self.event.beam_energy:g} TeV",
+                        f"{ABOUT.get(name, (name,))[0]}  {energy_text(self.event.beam_energy)}",
                     )
         # The most energetic particles that have appeared and are worth naming.
         shown = []
@@ -762,8 +668,8 @@ class ParticleModule(BaseModule):
                 continue
             if track.origin == "radiated":
                 continue
-            if len(track.points) < 2 and not (self.event.custom and track.parent < 0):
-                continue  # (a custom particle placed at rest is named where it sits)
+            if len(track.points) < 2:
+                continue
             shown.append(track)
         shown.sort(key=lambda t: -t.p4[0])
         for track in shown[:MAX_LABELS]:
@@ -787,10 +693,21 @@ class ParticleModule(BaseModule):
             )
             imgui.pop_text_wrap_pos()
             return
+        formation = self.event.formation
+        if formation is not None and not formation["formed"]:
+            imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + WRAP)
+            imgui.text_disabled(
+                f"No Z was formed: at sqrt(s) = {formation['sqrt_s']:.4f} GeV the probability"
+                f" was {formation['probability']:.3g}. Nothing else is simulated: the electron"
+                " and the positron fly on along the beam line."
+            )
+            imgui.pop_text_wrap_pos()
+            return
         if self.event.mechanism not in MECHANISMS:
             imgui.text_disabled("No single process to draw for this event.")
             return
         a, b, made, text = MECHANISMS[self.event.mechanism]
+        protons = self.event.beams == ("p", "p")
         imgui.dummy((WRAP, 96.0))
         corner = imgui.get_item_rect_min()
         draw_list = imgui.get_window_draw_list()
@@ -801,14 +718,17 @@ class ParticleModule(BaseModule):
         grey = imgui.get_color_u32((0.6, 0.6, 0.65, 1.0))
         left, right = (x0 + 130.0, y0 + 48.0), (x0 + 215.0, y0 + 48.0)
         # Two protons (three quarks each); one constituent of each goes in.
+        # Or the two beam particles themselves (e- e+).
         for sign, label in ((-1.0, a), (1.0, b)):
             centre = (x0 + 28.0, y0 + 48.0 + sign * 30.0)
-            draw_list.add_circle(centre, 15.0, blue, 0, 1.5)
-            for dx, dy in ((-5.0, -4.0), (6.0, -2.0), (0.0, 6.0)):
-                draw_list.add_circle_filled((centre[0] + dx, centre[1] + dy), 2.5, blue)
+            if protons:
+                draw_list.add_circle(centre, 15.0, blue, 0, 1.5)
+                for dx, dy in ((-5.0, -4.0), (6.0, -2.0), (0.0, 6.0)):
+                    draw_list.add_circle_filled((centre[0] + dx, centre[1] + dy), 2.5, blue)
             draw_list.add_line((centre[0] + 15.0, centre[1]), left, white, 1.5)
             draw_list.add_text((x0 + 60.0, centre[1] - (16.0 if sign < 0 else -3.0)), white, label)
-        draw_list.add_text((x0 + 48.0, y0 + 41.0), grey, "protons")
+        if protons:
+            draw_list.add_text((x0 + 48.0, y0 + 41.0), grey, "protons")
         draw_list.add_line(left, right, warm, 2.5)
         draw_list.add_text((left[0] + 28.0, left[1] - 18.0), warm, made)
         outgoing = [t.name for t in self.event.tracks if t.parent < 0][:2]
@@ -820,11 +740,19 @@ class ParticleModule(BaseModule):
             draw_list.add_text((tip[0] + 6.0, tip[1] - 7.0), white, name)
         imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + WRAP)
         imgui.text_wrapped(text)
-        imgui.text_disabled(
-            "Not to scale and not simulated: a proton is 1e-15 m across, and this is"
-            " the usual mechanism as known from theory and experiment, not something"
-            " the module computes."
-        )
+        if formation is not None:
+            imgui.text_disabled(
+                "Not to scale. Computed: whether the pair forms the Z, from sqrt(s) (the"
+                " Breit-Wigner shape, probability 1 at the peak, not a cross section); the Z"
+                " has the pair's four-momentum. Left out: the photon exchange, initial-state"
+                " radiation, the forward-backward asymmetry."
+            )
+        else:
+            imgui.text_disabled(
+                "Not to scale and not simulated: a proton is 1e-15 m across, and this is"
+                " the usual mechanism as known from theory and experiment, not something"
+                " the module computes."
+            )
         imgui.pop_text_wrap_pos()
 
     def _draw_selected(self):
@@ -845,6 +773,11 @@ class ParticleModule(BaseModule):
             if boson["from"] == "the collision":
                 made = (
                     "Put at the collision point by the generator (its production is not simulated)."
+                )
+            elif self.event.formation is not None:
+                made = (
+                    f"Formed in {boson['from']} (computed from sqrt(s), see the diagram): it has"
+                    " the pair's four-momentum, so it is at rest and its mass is sqrt(s)."
                 )
             else:
                 made = f"Made by the decay of {boson['from']}."
@@ -891,16 +824,16 @@ class ParticleModule(BaseModule):
         if particle.charge != 0 and self.shown_field > 0.0 and pt > 0.0:
             radius = helix_radius(pt, particle.charge, self.shown_field)
             imgui.text(f"Curls with radius {radius:.3g} m in the magnet")
-        custom = self.event.custom
-        if custom and track.parent < 0:
-            imgui.text_wrapped(
-                "Placed here by hand (custom setup): not something a collision is"
-                " claimed to produce."
+        if track.origin == "beam":
+            source = (
+                "the beam: it met its partner without forming a Z, and nothing else is"
+                " simulated, so it flies on along the beam line"
             )
-        if track.parent < 0:
+        elif track.parent < 0:
             source = "the collision" + (" (recorded by CMS)" if self.event.real else "")
             for boson in self.event.bosons:
-                if track.name in boson["daughters"] and boson["name"] != "H":
+                # (Not the Higgs of H -> Z Z*: its leptons come from the two Z.)
+                if track.name in boson["daughters"] and "Z" not in boson["daughters"]:
                     source = f"the decay of the {ABOUT[boson['name']][0]}"
         else:
             how = {
@@ -909,8 +842,7 @@ class ParticleModule(BaseModule):
                 "conversion": "the conversion of",
             }
             source = f"{how.get(track.origin, 'the')} {tracks[track.parent].name}"
-        if not (custom and track.parent < 0):
-            imgui.text_wrapped(f"Came from {source}.")
+        imgui.text_wrapped(f"Came from {source}.")
         ending = ENDINGS.get(track.end, track.end)
         where = float(np.linalg.norm(track.points[-1]))
         place = region(track.points[-1])
@@ -918,16 +850,10 @@ class ParticleModule(BaseModule):
         place_text = f" in the {PLACE[place.name]}" if inside else ""
         children = [c.name for c in tracks if c.parent == index and c.origin == "decay"]
         to = f" into {' '.join(children)}" if children and track.end == "decay" else ""
-        if custom:
-            imgui.text_wrapped(
-                f"It {ending}{to}{place_text}, {where:.3g} m from the centre of the detector,"
-                f" {track.times[-1]:.3g} ns after the start."
-            )
-        else:
-            imgui.text_wrapped(
-                f"It {ending}{to}{place_text}, {where:.3g} m from the collision,"
-                f" {track.times[-1]:.3g} ns after it."
-            )
+        imgui.text_wrapped(
+            f"It {ending}{to}{place_text}, {where:.3g} m from the collision,"
+            f" {track.times[-1]:.3g} ns after it."
+        )
         if track.ionisation > 0.01:
             imgui.text(f"Lost {track.ionisation:.3g} GeV to the material on the way")
         imgui.pop_text_wrap_pos()
@@ -953,14 +879,6 @@ class ParticleModule(BaseModule):
 
     def _draw_histogram(self):
         hist = self._histogram()
-        if hist is None:
-            imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + WRAP)
-            imgui.text_disabled(
-                "No histogram: this custom setup only fires particles, so there is no"
-                " parent whose mass would be measured. Add a 'Decay a parent' entry for one."
-            )
-            imgui.pop_text_wrap_pos()
-            return
         size = (WRAP, 90.0)
         counts = self.histogram.counts
         top = float(max(counts.max(), 1.0)) * 1.1
@@ -995,20 +913,22 @@ class ParticleModule(BaseModule):
             # Width from the central 68% (robust against the long tails).
             _, median, half_width = summary
             imgui.text(f"{entries} entries: median {median:.4g}, +-{half_width:.3g} GeV")
-        if self.scene_name == CUSTOM:
+        how = self.event.measurement
+        if self.event.real or self.scene_name == "Z -> e+ e-":
+            how = ""
+        texts = {
+            "tracker": "Momenta: true values smeared by a tracker's resolution, which follows the"
+            " magnet's field (about 1/B); not fitted to the paths drawn.",
+            "calorimeter": "Photons: true directions, and true energies smeared by a"
+            " calorimeter's resolution (about 0.5% at 60 GeV); not from the showers drawn.",
+            "beams": "sqrt(s) is set by the beam energies (drawn uniformly in M_Z -+"
+            f" {SCAN_WIDTHS:g} Gamma_Z),"
+            " not measured: the histogram counts the collisions that formed a Z, and so traces"
+            " the Breit-Wigner line shape.",
+        }
+        if how in texts:
             imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + WRAP)
-            imgui.text_disabled(
-                "Of the first 'Decay a parent' entry: everything visible that came from the"
-                " parent. True momenta smeared by the model detector's resolution"
-                " (tracker, about 1/B; calorimeter for electrons and photons)."
-            )
-            imgui.pop_text_wrap_pos()
-        elif not self.event.real and self.scene_name != "Z -> e+ e-":
-            imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + WRAP)
-            imgui.text_disabled(
-                "Momenta: true values smeared by a tracker's resolution, which follows the"
-                " magnet's field (about 1/B); not fitted to the paths drawn."
-            )
+            imgui.text_disabled(texts[how])
             imgui.pop_text_wrap_pos()
         if hist.peaks:
             known = ", ".join(f"{name} {value:.4g}" for value, name in hist.peaks)
@@ -1032,7 +952,7 @@ class ParticleModule(BaseModule):
             def work():
                 try:
                     particle_opendata.download()
-                except OSError as error:
+                except Exception as error:  # noqa: BLE001 (any failure is shown, not raised)
                     self.download_error = f"Download failed: {error}"
 
             self.downloader = threading.Thread(target=work, daemon=True)
@@ -1046,11 +966,13 @@ class ParticleModule(BaseModule):
         if self.camera is not None and W > 0 and H > 0:
             self._handle_click(W, H)
             self._draw_overlay(W, H)
+            draw_scale_bar(self.camera, W, H, 1.0, "m")
         if self.waiting_for_data and not self._missing_data():
-            self.new_event()  # the data has arrived
-        if self.scene_name == CUSTOM:
-            self.editor.update()
-            self._follow_custom()
+            # The data has arrived: drop the placeholder event prepared without it.
+            if self.worker is not None:
+                self.worker.join()
+            self.next_event = None
+            self.new_event()
 
         imgui.set_next_window_pos(
             (W - WINDOW_MARGIN, WINDOW_MARGIN), imgui.Cond_.always, (1.0, 0.0)
@@ -1071,37 +993,31 @@ class ParticleModule(BaseModule):
             imgui.end()
             return
         imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + WRAP)
-        if self.notice:
-            imgui.text_colored((1.0, 0.6, 0.3, 1.0), self.notice)
         if self.event.error:
             imgui.text_colored((1.0, 0.5, 0.4, 1.0), self.event.error)
             imgui.text_wrapped("'Next event' tries again; another event type can be chosen.")
         # What this is and is not, always in view.
-        custom = self.scene_name == CUSTOM
-        if custom:
-            imgui.text_disabled(
-                "A custom event: particles placed by hand, not a collision. It says nothing"
-                " about what collisions produce. Computed: decays, kinematics, paths in the"
-                " field. Approximate models: energy loss, scattering, showers, detector"
-                " resolution."
-            )
-        elif self.event.real:
+        if self.event.real:
             imgui.text_disabled(
                 "Measured by CMS: the two muons' momenta and charges. Computed here: their"
                 " paths, in a simplified model of the detector."
             )
-        else:
+        elif self.event.formation is not None:
             imgui.text_disabled(
-                "Not simulated: what the collision produces (drawn from simple distributions)."
-                " Computed: decays, kinematics, paths in the field. Approximate models:"
+                "Computed: whether the e- e+ pair forms a Z, from sqrt(s) (the Breit-Wigner"
+                " shape, not a cross section; photon exchange and initial-state radiation left"
+                " out); the Z's decays, kinematics, paths in the field. Approximate models:"
                 " energy loss, scattering, showers, detector resolution."
             )
-        imgui.pop_text_wrap_pos()
-        if custom:
-            imgui.text_disabled(f"t = {max(self.now, 0.0):.1f} ns after the particles start")
         else:
-            moment = "before" if self.now < 0.0 else "after"
-            imgui.text_disabled(f"t = {abs(self.now):.1f} ns {moment} the collision")
+            imgui.text_disabled(
+                "Not simulated: what the proton-proton collision produces (drawn from simple"
+                " distributions). Computed: decays, kinematics, paths in the field. Approximate"
+                " models: energy loss, scattering, showers, detector resolution."
+            )
+        imgui.pop_text_wrap_pos()
+        moment = "before" if self.now < 0.0 else "after"
+        imgui.text_disabled(f"t = {abs(self.now):.1f} ns {moment} the collision")
         # What is happening, in words: the lines whose time has come.
         happened = [entry for entry in self.log if entry[0] <= self.now + 1e-9][-LOG_LINES:]
         imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + WRAP)
@@ -1117,14 +1033,12 @@ class ParticleModule(BaseModule):
         if self.selected is not None:
             self._draw_selected()
         else:
-            where = "" if custom else " (or the collision point)"
-            imgui.text_disabled(f"Click a particle{where} for information")
+            imgui.text_disabled("Click a particle (or the collision point) for information")
         imgui.separator()
         self._draw_histogram()
-        if self._histogram() is not None:
-            if imgui.button(f"Add {BATCH} events"):
-                self.request_fill(BATCH)
-            imgui.same_line()
+        if imgui.button(f"Add {BATCH} events"):
+            self.request_fill(BATCH)
+        imgui.same_line()
         if imgui.button("Next event"):
             self.new_event()
         if self.to_fill:
@@ -1138,7 +1052,7 @@ class ParticleModule(BaseModule):
             imgui.text_colored((1.0, 0.5, 0.4, 1.0), f"Adding events failed: {self.fill_error}")
             imgui.pop_text_wrap_pos()
 
-        if not custom and imgui.collapsing_header("The collision, close up (diagram)"):
+        if imgui.collapsing_header("The collision, close up (diagram)"):
             self._draw_diagram()
         if imgui.collapsing_header("Particles in this event"):
             self._draw_particle_list()
@@ -1158,14 +1072,16 @@ class ParticleModule(BaseModule):
             "bremsstrahlung, parametrised showers; the measurement (true momenta\n"
             "smeared by the resolution a tracker of this size has in this field,\n"
             "not fitted to the paths).\n"
-            "Not simulated: what a collision produces (drawn from simple\n"
-            "distributions matched to measured averages); how a Z, J/psi or Higgs\n"
-            "is produced (the sentence and diagram are an illustration).\n"
+            "Not simulated: what a proton-proton collision produces (drawn from\n"
+            "simple distributions matched to measured averages); how a Z, J/psi,\n"
+            "B+, D*+ or Higgs is produced there (the sentence and diagram are an\n"
+            "illustration).\n"
+            "'e+ e- -> Z' scan: whether the pair forms a Z is computed from\n"
+            "sqrt(s) (Breit-Wigner shape, probability 1 at the peak, not a cross\n"
+            "section); the photon exchange and initial-state radiation are left out.\n"
             "'Real data' events: the muons' momenta and charges are CMS's\n"
             "measurements; their paths through the detector are recomputed here.\n"
-            "Pairs of equal charge are shown but kept out of the histogram.\n"
-            "'Custom' events: particles placed by hand with the momenta you set. They\n"
-            "are not collisions; only their decays, paths and measurement are computed."
+            "Pairs of equal charge are shown but kept out of the histogram."
         )
         imgui.end()
 
@@ -1177,7 +1093,7 @@ class ParticleModule(BaseModule):
         particles = ", ".join(f"{n} {name}" for name, n in ordered)
         charged = [t for t in self.event.tracks if PARTICLES[t.name].charge != 0 and t.parent < 0]
         lines = [
-            f" Time: {self.now:.1f} ns relative to the {'start' if self.event.custom else 'collision'}"
+            f" Time: {self.now:.1f} ns relative to the collision"
             f" (light: {abs(self.now) * C:.1f} m)",
             f" Events: {self.events_seen}; this one: {len(self.event.tracks)} particles",
             f" {particles}",

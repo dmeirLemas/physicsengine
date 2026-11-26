@@ -32,7 +32,7 @@ Decay modes, two kinds of table.
   mode i with probability B_i / sum_j B_j. The ratios between listed modes
   are the measured ones; the absolute fractions are not (each is larger by
   1 / sum_j B_j). `Particle.covered` is the share sum_j B_j, given in the
-  comments and shown by the Custom window.
+  comments.
 
 Charge-conjugate particles get the mirrored table (`_conjugate`).
 

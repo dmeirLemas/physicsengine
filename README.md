@@ -1,6 +1,6 @@
 # physengine
 
-A physics simulator with one window and several simulations: massive-body systems, galaxy collisions, black holes, particle decays and collisions, and the atom. All modules share the same window, camera and controls.
+A physics simulator with one window and several simulations: massive-body systems, galaxy collisions, black holes, particle decays in a detector, and the atom. All modules share the same window, camera and controls.
 
 ## Requirements
 
@@ -36,6 +36,8 @@ The window opens on the **Home** screen, which describes each module and lists i
 
 - **Mouse:** left drag orbits; right or middle drag pans; the mouse wheel zooms.
 - **Simulation panel:** Pause, Restart (keeps your edits), Full reset (restores every default), and Time Scale.
+- **Guided tour:** F5, or the button on the Home screen, runs through every module on its own (about four minutes). Space holds it, Left and Right skip between stops, Esc ends it; dragging the view also holds it.
+- **Scale bar:** the bar in the bottom-left corner gives the size of things at the distance of the point the camera looks at.
 
 ## Optional data
 
@@ -46,7 +48,7 @@ Two modules can use downloaded data. Both work without it, with less detail.
 
 ## Saved scenarios
 
-Each module can save its current setup as a JSON file in `saves/<module>/` at the repository root. The folder is created the first time you save. Saved scenarios also appear on the Home screen.
+The massive-body, galaxy and black-hole modules can save their current setup as a JSON file in `saves/<module>/` at the repository root. The folder is created the first time you save. Saved scenarios also appear on the Home screen.
 
 ## Tests
 

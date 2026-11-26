@@ -39,6 +39,7 @@ import numpy as np
 from imgui_bundle import imgui
 
 from physengine.core.module import BaseModule
+from physengine.core.scalebar import draw_scale_bar, length_text
 from physengine.core.spec import Choice, SliderFloat
 from physengine.modules import atom_data, atom_panels
 from physengine.modules import atom_scenes as scenes
@@ -49,13 +50,6 @@ CLICK_SLOP = 4.0  # a press and release closer than this is a click, not a drag
 PICK_PIXELS = 9.0
 LOG_SHOWN = 4
 ZOOM_SECONDS = 1.6  # time constant of the animated zoom
-
-
-def length_text(metres):
-    for size, unit in ((1e-9, "nm"), (1e-12, "pm"), (1e-15, "fm")):
-        if metres >= size:
-            return f"{metres / size:.3g} {unit}"
-    return f"{metres / 1e-15:.2g} fm"
 
 
 class AtomModule(BaseModule):
@@ -221,14 +215,7 @@ class AtomModule(BaseModule):
                         (at[0] + 8.0, at[1] - 8.0), imgui.get_color_u32((*rgb, 1.0)), text
                     )
         if scene.unit_metres:
-            # How large the view is, in real units: the visible height at the target.
-            height = 2.0 * camera.distance * np.tan(camera.fov / 2.0)
-            bar = height * 0.2
-            text = f"{length_text(bar * scene.unit_metres)}  ({bar:.3g} {scene.unit})"
-            x0, y0 = 16.0, H - 22.0
-            white = imgui.get_color_u32((0.8, 0.85, 0.95, 0.9))
-            draw_list.add_line((x0, y0), (x0 + 0.2 * H, y0), white, 2.0)
-            draw_list.add_text((x0, y0 - 18.0), white, text)
+            draw_scale_bar(camera, W, H, scene.unit_metres, scene.unit)
 
     def _draw_data_source(self):
         table = self.table
@@ -305,10 +292,9 @@ class AtomModule(BaseModule):
         else:
             imgui.text_disabled("Click a nucleon or particle for information")
         legend = atom_panels.LEGENDS.get(self.built_name, atom_panels.LEGENDS["nuclear"])
-        if not self.built_name.startswith("Decay of a sample") and self.built_name != "Decay chain":
-            if imgui.collapsing_header("Legend"):
-                for color, text in legend:
-                    atom_panels.swatch(color, text)
+        if imgui.collapsing_header("Legend"):
+            for color, text in legend:
+                atom_panels.swatch(color, text)
         self._draw_data_source()
         imgui.end()
 

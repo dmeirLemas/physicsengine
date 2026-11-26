@@ -7,7 +7,7 @@ from physengine.modules.particlemodule import ParticleModule
 
 REGISTRY = {
     "Home": HomeModule,
-    "NbodyModule": NBodyModule,
+    "Massive bodies": NBodyModule,
     "Galaxies": GalaxyModule,
     "Black hole": BlackHoleModule,
     "Particles": ParticleModule,

@@ -52,8 +52,6 @@ DEFAULTS = {
     "atom": {"Z": 18, "magnify": True},
     "nucleus": {"Z": 26, "A": 56},
     "decay": {"nuclide": "U-238", "continuous": True},
-    "sample": {"nuclide": "I-131", "n0": 2000, "rate": 0.4},
-    "chain": {"nuclide": "U-238", "n0": 4000, "clock": "Logarithmic", "rate": 0.35},
     "fission": {"system": "U-235", "continuous": True},
     "chainreaction": {"R": 2.4, "p": 0.6, "start": 30},
     "fusion": {"reaction": "D + T -> He-4 + n", "log_temperature": 8.2, "continuous": True},
@@ -84,13 +82,6 @@ SHELL_COLORS = (
     (0.25, 0.90, 0.78),  # 6 (P)
     (0.55, 0.95, 0.35),  # 7 (Q)
 )
-SPECIES_COLORS = (
-    (0.30, 0.75, 1.0), (1.0, 0.62, 0.20), (0.95, 0.32, 0.45), (0.62, 0.45, 1.0),
-    (0.30, 0.92, 0.62), (1.0, 0.85, 0.30), (1.0, 0.45, 0.85), (0.45, 0.95, 0.95),
-    (0.75, 0.95, 0.30), (0.95, 0.50, 0.35), (0.50, 0.60, 1.0), (0.90, 0.70, 0.95),
-    (0.35, 0.85, 0.45), (1.0, 0.72, 0.55), (0.60, 0.80, 1.0), (0.85, 0.40, 0.65),
-)  # fmt: skip
-STABLE_COLOR = (0.30, 0.32, 0.38)
 KIND_COLOR = {
     "electron": ELECTRON, "positron": POSITRON, "neutrino": NEUTRINO, "photon": PHOTON,
     "neutron": NEUTRON, "proton": PROTON,
@@ -401,7 +392,7 @@ class OrbitalScene(Scene):
                 "Nucleus",
                 [
                     f"Charge +{self.s['Z']}e. At this scale it would be about"
-                    f" {2.4e-5 * self.table.default_isotope(self.s['Z']) ** (1 / 3):.1g} a0"
+                    f" {4.54e-5 * self.table.default_isotope(self.s['Z']) ** (1 / 3):.1g} a0"
                     " across: a hundred-thousandth of the cloud. The dot only marks the place."
                 ],
             )
@@ -1533,216 +1524,11 @@ class FusionScene(EventScene):
         return self.flight_labels()
 
 
-# ============================================================== samples and chains
-
-SAMPLE_PRESETS = (
-    "I-131",
-    "C-14",
-    "Co-60",
-    "Rn-222",
-    "Po-210",
-    "F-18",
-    "H-3",
-    "n",
-    "Tc-99m",
-    "U-238",
-)
-CHAIN_PRESETS = (
-    "U-238", "Th-232", "U-235", "Np-237", "Rn-222", "Pb-212", "Ra-224", "Mo-99", "Sr-90",
-)  # fmt: skip
-
-
-def first_step_only(species):
-    """The chain cut after the first decay: the daughters are not followed."""
-    for entry in species[1:]:
-        entry.branches = []
-        entry.half_life = np.inf
-    return species
-
-
-def sunflower(n):
-    """n points filling a disc evenly (golden-angle spiral), spacing about 1."""
-    k = np.arange(n) + 0.5
-    r = 0.56 * np.sqrt(k)
-    angle = k * np.pi * (3.0 - np.sqrt(5.0))
-    return np.stack([r * np.cos(angle), r * np.sin(angle), np.zeros(n)], 1)
-
-
-class SampleScene(Scene):
-    """Many nuclei of one kind, each decaying at its own random moment.
-
-    mode 'sample': one nuclide, the clock runs in half-lives, the count of
-    survivors is compared with N0 exp(-lambda t).
-    mode 'chain': the nuclide and all its descendants, the clock can sweep
-    logarithmically over many orders of magnitude, and every member's
-    population is compared with the Bateman solution.
-    """
-
-    unit = "(nuclei drawn side by side; no length scale)"
-    unit_metres = None
-    FLASH = 0.45  # seconds a nucleus glows after decaying
-    HISTORY = 1500
-
-    def __init__(self, table, rng, mode):
-        super().__init__(table, rng)
-        self.mode = mode
-        self.s = SETTINGS[mode]
-        if mode == "sample":
-            self.title = "Decay of a sample"
-            self.disclaimer = (
-                "Computed: every nucleus decays at a random time drawn from the exponential"
-                " law with the measured half-life (exact for any speed of the clock); the"
-                " curve is N0 exp(-lambda t). Illustration: the nuclei laid out as dots."
-            )
-        else:
-            self.title = "Decay chain"
-            self.disclaimer = (
-                "Computed: each nucleus is followed through the whole series with the measured"
-                " half-lives and branchings (NUBASE2020), exactly, whatever the clock's speed;"
-                " the curves are the Bateman solution. Branches rarer than 0.1% are left out."
-                " Illustration: the nuclei laid out as dots."
-            )
-        self.set_nuclide(self.s["nuclide"])
-
-    def set_nuclide(self, name):
-        parsed = parse_label(name)
-        if parsed is None or not self.table.exists(parsed[0], parsed[1]):
-            self.say(f"'{name}' is not a nuclide.")
-            return False
-        species = atom_decay.build_chain(self.table, *parsed)
-        if not species[0].branches:
-            why = species[0].note or "it is stable"
-            self.say(f"{label(*parsed)} does not decay here ({why}).")
-            if hasattr(self, "sample"):
-                return False
-        self.s["nuclide"] = label(*parsed)
-        self.species = first_step_only(species) if self.mode == "sample" else species
-        self.restart()
-        return True
-
-    def restart(self):
-        n0 = int(self.s["n0"])
-        self.n0 = n0
-        self.sample = atom_decay.DecaySample(self.species, n0, self.rng)
-        self.grid = sunflower(n0)
-        self.extent = float(np.abs(self.grid).max())
-        self.view = (2.75 * self.extent, 0.0, 0.0)
-        self.view_version += 1
-        self.flash = np.zeros(n0)
-        rates = np.array([s.rate for s in self.species])
-        live = rates[rates > 0.0]
-        self.half_life = self.species[0].half_life
-        if len(live) == 0:
-            self.t_start, self.t_end = 1.0, 10.0
-        else:
-            # From when the first decay is expected to when all is over.
-            self.t_end = 14.0 * atom_decay.LN2 / live.min()
-            self.t_start = min(0.03 / (n0 * rates[0]), 1e-3 * self.t_end) if rates[0] > 0 else 1.0
-        self.t = self.t_start if self.logarithmic else 0.0
-        self.history_t = []
-        self.history_n = []
-        grid_t = np.geomspace(self.t_start, self.t_end, 240)
-        self.theory_t = (
-            grid_t if self.mode == "chain" else np.linspace(0.0, 7.0 * self.half_life, 240)
-        )
-        self.theory = atom_decay.bateman(self.species, self.theory_t, n0)
-        self.colors = np.array(
-            [
-                STABLE_COLOR if s.half_life == np.inf else SPECIES_COLORS[k % len(SPECIES_COLORS)]
-                for k, s in enumerate(self.species)
-            ]
-        )
-        self.counts = self.sample.populations(self.t)
-        self.decays = 0
-        self.log.clear()
-        first = self.species[0]
-        if self.mode == "sample":
-            self.say(
-                f"{n0} nuclei of {first.name}, half-life {format_time(first.half_life)}."
-                " In each half-life about half of those left decay; which ones is chance."
-            )
-        else:
-            members = [s for s in self.species if s.half_life != np.inf]
-            ends = [s.name for s in self.species if s.half_life == np.inf]
-            self.say(
-                f"{n0} nuclei of {first.name}. The series has {len(members)} radioactive"
-                f" members and ends at {', '.join(ends)}."
-            )
-        self._record()
-
-    @property
-    def logarithmic(self):
-        return self.mode == "chain" and self.s["clock"] == "Logarithmic"
-
-    @property
-    def finished(self):
-        return self.t >= self.t_end
-
-    def _record(self):
-        self.history_t.append(self.t)
-        self.history_n.append(self.counts.copy())
-        if len(self.history_t) > self.HISTORY:
-            # Thin the older half.
-            keep = list(range(0, self.HISTORY // 2, 2)) + list(
-                range(self.HISTORY // 2, len(self.history_t))
-            )
-            self.history_t = [self.history_t[i] for i in keep]
-            self.history_n = [self.history_n[i] for i in keep]
-
-    def step(self, dt):
-        self.flash = np.maximum(self.flash - dt, 0.0)
-        if self.finished:
-            return
-        before = self.t
-        rate = self.s["rate"]
-        if self.mode == "sample":
-            self.t += rate * self.half_life * dt
-        elif self.logarithmic:
-            self.t *= 10.0 ** (rate * dt)
-        else:
-            self.t += rate * 0.1 * self.t_end * dt
-        self.t = min(self.t, self.t_end)
-        who, _ = self.sample.decays_between(before, self.t)
-        self.decays += len(who)
-        self.flash[who] = self.FLASH
-        self.counts = self.sample.populations(self.t)
-        self._record()
-
-    def balls(self):
-        state = self.sample.state_at(self.t)
-        rows = np.zeros((self.n0, 8))
-        rows[:, 0:3] = self.grid
-        rows[:, 3] = 0.40
-        rows[:, 4:7] = self.colors[state]
-        glowing = self.flash > 0.0
-        rows[glowing, 7] = -2.2 * self.flash[glowing] / self.FLASH
-        rows[glowing, 4:7] = 0.5 * rows[glowing, 4:7] + 0.5
-        self.infos = [
-            (
-                s.name,
-                [
-                    "Stable (or not followed further)."
-                    if s.half_life == np.inf
-                    else f"Half-life {format_time(s.half_life)}.",
-                    f"{self.counts[k]} of the {self.n0} nuclei are this now.",
-                ],
-            )
-            for k, s in enumerate(self.species)
-        ]
-        return rows, state
-
-    def expected(self, t=None):
-        """Bateman's expected populations at time t (default: now)."""
-        return atom_decay.bateman(self.species, self.t if t is None else t, self.n0)[:, 0]
-
-
 SCENES = {
     "Hydrogen-like orbital": lambda table, rng: OrbitalScene(table, rng),
     "Atom: shells and nucleus": lambda table, rng: AtomScene(table, rng),
     "Nucleus and binding energy": lambda table, rng: NucleusScene(table, rng),
     "Decay of one nucleus": lambda table, rng: DecayScene(table, rng),
-    "Decay of a sample": lambda table, rng: SampleScene(table, rng, "sample"),
-    "Decay chain": lambda table, rng: SampleScene(table, rng, "chain"),
     "Fission of one nucleus": lambda table, rng: FissionScene(table, rng),
     "Chain reaction": lambda table, rng: ChainReactionScene(table, rng),
     "Fusion": lambda table, rng: FusionScene(table, rng),

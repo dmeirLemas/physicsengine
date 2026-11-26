@@ -6,6 +6,7 @@ through BaseModule.switch_requested.
 
 from imgui_bundle import imgui
 
+from physengine.core import tour
 from physengine.core.module import BaseModule
 from physengine.modules import scenario_files
 from physengine.modules.starfield import Starfield
@@ -13,7 +14,7 @@ from physengine.modules.starfield import Starfield
 # (registry name, kind of its saved scenarios, title, what it shows)
 MODULES = (
     (
-        "NbodyModule",
+        "Massive bodies",
         "nbody",
         "Planets, stars and black holes",
         "A few bodies under gravity, with relativity: the solar system, binary and triple"
@@ -50,11 +51,10 @@ MODULES = (
         None,
         "The atom and its nucleus",
         "Electron clouds of hydrogen-like orbitals and the shells of heavier atoms; the"
-        " nucleus with measured masses and binding energies; radioactive decay, one nucleus"
-        " at a time, as a sample, and through whole decay chains; fission, a schematic chain"
-        " reaction, and fusion with its tunnelling barrier. Energies, half-lives and"
-        " statistics are computed from measured data; the pictures of nucleons are"
-        " illustrations.",
+        " nucleus with measured masses and binding energies; radioactive decay of one nucleus"
+        " at a time; fission, a schematic chain reaction, and fusion with its tunnelling"
+        " barrier. Energies and half-lives are computed from measured data; the pictures of"
+        " nucleons are illustrations.",
     ),
 )
 WIDTH = 720.0
@@ -111,6 +111,10 @@ class HomeModule(BaseModule):
         imgui.begin("Physics engine", None, flags)
         imgui.text_disabled("Five physics modules in one window. Pick one to open it.")
         imgui.text_disabled("Every module starts paused: untick Pause (or press Space) to run it.")
+        if imgui.button("Start the guided tour"):
+            tour.request_start()
+        imgui.same_line()
+        imgui.text_disabled("(or press F5 at any time: a few minutes through every module)")
         imgui.push_text_wrap_pos(imgui.get_cursor_pos().x + width - 30.0)
         for registry_name, kind, title, text in MODULES:
             imgui.separator()
