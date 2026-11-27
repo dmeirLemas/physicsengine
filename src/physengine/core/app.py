@@ -7,6 +7,7 @@ from moderngl_window.timers.clock import Timer
 from physengine.core.camera import OrbitCamera
 from physengine.core.imgui_renderer import ImGuiRenderer
 from physengine.core.module import BaseModule
+from physengine.core.recorder import Recorder
 
 
 class Window:
@@ -76,6 +77,16 @@ class Window:
 
         self.camera = OrbitCamera(W, H)
 
+        # Records the 3D view, without the ImGui windows, to an MP4 (F9).
+        self.recorder = Recorder()
+        self.record_for_seconds = False
+        self.record_seconds = 10.0
+        # The Recording window, opened from the Simulation window.
+        self.show_recording_window = False
+        self.confirm_discard = False
+        # Bottom-left corner and width of the Simulation window, to place it below.
+        self.sim_window_rect = (10.0, 10.0, 0.0)
+
     def on_mouse_drag(self, x, y, dx, dy):
         self.imgui_.mouse_drag_event(x, y, dx, dy)
         if not imgui.get_io().want_capture_mouse:
@@ -119,6 +130,7 @@ class Window:
         SPACE = self.window.keys.SPACE
         ESC = self.window.keys.ESCAPE
         R = self.window.keys.R
+        F9 = self.window.keys.F9
 
         self.imgui_.key_event(key, action, modifiers)
         if not imgui.get_io().want_capture_keyboard:
@@ -134,6 +146,9 @@ class Window:
                     self.request_full_reset()
                 else:
                     self.request_reset()
+
+            if key == F9 and action == ACTION_PRESS:
+                self.toggle_recording()
 
             if key == ESC and action == ACTION_PRESS:
                 self.window.close()
@@ -188,6 +203,8 @@ class Window:
 
                 self.window.clear(0.1, 0.2, 0.3)
                 self.active_module.render(self.ctx, self.camera)
+                # Read the frame now, before the ImGui windows are drawn over it.
+                self.recorder.capture(self.window.buffer_size, frame_time)
 
                 self.imgui_.begin_frame(frame_time)
 
@@ -230,11 +247,17 @@ class Window:
                     if spec.draw(self.active_module) and spec.need_reset:
                         self.request_reset()
 
+                self.draw_record_launcher()
+
                 diagnostics = self.active_module.diagnostics()
                 if diagnostics and imgui.tree_node("Diagnostics"):
                     imgui.text(diagnostics)
                     imgui.tree_pop()
+                pos, size = imgui.get_window_pos(), imgui.get_window_size()
+                self.sim_window_rect = (pos.x, pos.y + size.y, size.x)
                 imgui.end()
+
+                self.draw_recording_window()
 
                 # The module's own windows, if it has any.
                 self.active_module.draw_ui()
@@ -254,10 +277,129 @@ class Window:
                 self.frame_counter += 1
 
         finally:
+            self.recorder.stop()
             if self.active_module_name is not None:
                 self.active_module.teardown()
             self.imgui_.shutdown()
             self.window.destroy()
+
+    def toggle_recording(self):
+        """Start recording the 3D view, or stop and save the recording."""
+        recorder = self.recorder
+        if recorder.recording:
+            recorder.stop()
+        else:
+            recorder.duration = self.record_seconds if self.record_for_seconds else None
+            recorder.start(self.window.buffer_size)
+
+    def recording_status(self):
+        """(text, colour) of the recorder's state, such as "REC 0:12.3"."""
+        recorder = self.recorder
+        if not recorder.recording:
+            return "Not recording", (0.6, 0.6, 0.6, 1.0)
+        elapsed = f"{int(recorder.elapsed // 60)}:{recorder.elapsed % 60:04.1f}"
+        if recorder.duration is not None:
+            total = recorder.duration
+            elapsed += f" / {int(total // 60)}:{total % 60:04.1f}"
+        if recorder.paused:
+            return f"PAUSED {elapsed}", (1.0, 0.8, 0.3, 1.0)
+        return f"REC {elapsed}", (1.0, 0.3, 0.3, 1.0)
+
+    def draw_record_launcher(self):
+        """The Simulation window's line for recording: a button that opens the
+        Recording window, and the recorder's state while it records."""
+        label = "Hide recording" if self.show_recording_window else "Recording..."
+        if imgui.button(label):
+            self.show_recording_window = not self.show_recording_window
+        imgui.set_item_tooltip("Record the 3D view to a video (F9 starts and stops)")
+        if self.recorder.recording:
+            imgui.same_line()
+            text, color = self.recording_status()
+            imgui.text_colored(color, text)
+
+    def draw_recording_window(self):
+        """Controls for the recorder: what to record, start, pause, stop, discard."""
+        if not self.show_recording_window:
+            return
+        recorder = self.recorder
+        left, bottom, sim_width = self.sim_window_rect
+        H = imgui.get_io().display_size.y
+        # Below the Simulation window, or beside it when there is no room below.
+        if bottom + 10.0 + 200.0 <= H:
+            imgui.set_next_window_pos((left, bottom + 10.0), imgui.Cond_.always)
+        else:
+            imgui.set_next_window_pos((left + sim_width + 10.0, 10.0), imgui.Cond_.always)
+        flags = imgui.WindowFlags_.always_auto_resize | imgui.WindowFlags_.no_move
+        expanded, self.show_recording_window = imgui.begin("Recording", True, flags)
+        if not expanded:
+            imgui.end()
+            return
+
+        text, color = self.recording_status()
+        imgui.text_colored(color, text)
+        if recorder.recording and recorder.duration is not None:
+            imgui.progress_bar(recorder.elapsed / recorder.duration, (220.0, 0.0), "")
+
+        imgui.separator()
+        imgui.begin_disabled(recorder.recording)
+        if imgui.radio_button("Until stopped", not self.record_for_seconds):
+            self.record_for_seconds = False
+        imgui.same_line()
+        if imgui.radio_button("For", self.record_for_seconds):
+            self.record_for_seconds = True
+        imgui.same_line()
+        imgui.set_next_item_width(90.0)
+        _, seconds = imgui.input_float("seconds", self.record_seconds, 1.0, 10.0, "%.1f")
+        self.record_seconds = max(seconds, 0.5)
+        imgui.set_next_item_width(90.0)
+        fps_choices = (24, 30, 60)
+        index = fps_choices.index(recorder.fps) if recorder.fps in fps_choices else 2
+        changed, index = imgui.combo("Frame rate", index, [str(f) for f in fps_choices])
+        if changed:
+            recorder.fps = fps_choices[index]
+        bw, bh = self.window.buffer_size
+        scales = (1.0, 0.5)
+        labels = [f"Full ({bw}x{bh})", f"Half ({int(bw * 0.5)}x{int(bh * 0.5)})"]
+        index = scales.index(recorder.scale) if recorder.scale in scales else 0
+        imgui.set_next_item_width(170.0)
+        changed, index = imgui.combo("Resolution", index, labels)
+        if changed:
+            recorder.scale = scales[index]
+        imgui.set_item_tooltip("Half: 4x fewer pixels to copy and encode, lighter on slow modules.")
+        imgui.end_disabled()
+
+        imgui.separator()
+        if not recorder.recording:
+            self.confirm_discard = False
+            if imgui.button("Start"):
+                self.toggle_recording()
+            imgui.set_item_tooltip("F9")
+        elif self.confirm_discard:
+            imgui.text("Delete this recording?")
+            if imgui.button("Yes, discard"):
+                recorder.discard()
+                self.confirm_discard = False
+            imgui.same_line()
+            if imgui.button("Keep recording"):
+                self.confirm_discard = False
+        else:
+            if imgui.button("Resume" if recorder.paused else "Pause"):
+                recorder.toggle_pause()
+            imgui.set_item_tooltip(
+                "While paused, nothing is recorded; the video carries on from here on resume."
+            )
+            imgui.same_line()
+            if imgui.button("Stop and save"):
+                recorder.stop()
+            imgui.set_item_tooltip("F9")
+            imgui.same_line()
+            if imgui.button("Discard"):
+                self.confirm_discard = True
+
+        if recorder.message:
+            imgui.text_disabled(recorder.message)
+        imgui.text_disabled("Only the 3D view is recorded, not these windows.")
+        imgui.end()
 
     def request_reset(self):
         """Rebuild the active module on the next frame, keeping its spec values.

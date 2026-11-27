@@ -35,3 +35,8 @@ smoketest.py
 # Scenarios saved from the application, and downloaded data (CERN Open Data)
 saves/
 data/
+
+# Videos recorded from the application (F9)
+recordings/
+
+demirtoken.txt
