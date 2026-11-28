@@ -308,7 +308,7 @@ class Window:
     def draw_record_launcher(self):
         """The Simulation window's line for recording: a button that opens the
         Recording window, and the recorder's state while it records."""
-        label = "Hide recording" if self.show_recording_window else "Recording..."
+        label = "Close recording" if self.show_recording_window else "Record video"
         if imgui.button(label):
             self.show_recording_window = not self.show_recording_window
         imgui.set_item_tooltip("Record the 3D view to a video (F9 starts and stops)")
@@ -318,7 +318,10 @@ class Window:
             imgui.text_colored(color, text)
 
     def draw_recording_window(self):
-        """Controls for the recorder: what to record, start, pause, stop, discard."""
+        """Controls for the recorder: what to record, start, pause, stop, discard.
+
+        The window keeps one size in every state: one row of buttons and a
+        status block of two lines, whatever they hold."""
         if not self.show_recording_window:
             return
         recorder = self.recorder
@@ -329,58 +332,79 @@ class Window:
             imgui.set_next_window_pos((left, bottom + 10.0), imgui.Cond_.always)
         else:
             imgui.set_next_window_pos((left + sim_width + 10.0, 10.0), imgui.Cond_.always)
+        width = 26.0 * imgui.get_font_size()
+        imgui.set_next_window_size_constraints((width, 0.0), (width, 10000.0))
         flags = imgui.WindowFlags_.always_auto_resize | imgui.WindowFlags_.no_move
         expanded, self.show_recording_window = imgui.begin("Recording", True, flags)
         if not expanded:
             imgui.end()
             return
 
-        text, color = self.recording_status()
-        imgui.text_colored(color, text)
-        if recorder.recording and recorder.duration is not None:
-            imgui.progress_bar(recorder.elapsed / recorder.duration, (220.0, 0.0), "")
-
-        imgui.separator()
+        # Settings: a label column and a row of choices each. Fixed while recording.
         imgui.begin_disabled(recorder.recording)
-        if imgui.radio_button("Until stopped", not self.record_for_seconds):
-            self.record_for_seconds = False
-        imgui.same_line()
-        if imgui.radio_button("For", self.record_for_seconds):
-            self.record_for_seconds = True
-        imgui.same_line()
-        imgui.set_next_item_width(90.0)
-        _, seconds = imgui.input_float("seconds", self.record_seconds, 1.0, 10.0, "%.1f")
-        self.record_seconds = max(seconds, 0.5)
-        imgui.set_next_item_width(90.0)
-        fps_choices = (24, 30, 60)
-        index = fps_choices.index(recorder.fps) if recorder.fps in fps_choices else 2
-        changed, index = imgui.combo("Frame rate", index, [str(f) for f in fps_choices])
-        if changed:
-            recorder.fps = fps_choices[index]
-        bw, bh = self.window.buffer_size
-        scales = (1.0, 0.5)
-        labels = [f"Full ({bw}x{bh})", f"Half ({int(bw * 0.5)}x{int(bh * 0.5)})"]
-        index = scales.index(recorder.scale) if recorder.scale in scales else 0
-        imgui.set_next_item_width(170.0)
-        changed, index = imgui.combo("Resolution", index, labels)
-        if changed:
-            recorder.scale = scales[index]
-        imgui.set_item_tooltip("Half: 4x fewer pixels to copy and encode, lighter on slow modules.")
+        if imgui.begin_table("record_settings", 2):
+            imgui.table_setup_column("label", imgui.TableColumnFlags_.width_fixed)
+            imgui.table_setup_column("value", imgui.TableColumnFlags_.width_stretch)
+
+            def row(label):
+                imgui.table_next_row()
+                imgui.table_next_column()
+                imgui.align_text_to_frame_padding()
+                imgui.text(label)
+                imgui.table_next_column()
+
+            row("Length")
+            if imgui.radio_button("Until stopped", not self.record_for_seconds):
+                self.record_for_seconds = False
+            imgui.same_line()
+            if imgui.radio_button("For", self.record_for_seconds):
+                self.record_for_seconds = True
+            imgui.same_line()
+            imgui.set_next_item_width(3.5 * imgui.get_font_size())
+            changed, seconds = imgui.input_float("s", self.record_seconds, 0.0, 0.0, "%.1f")
+            if changed:
+                self.record_for_seconds = True
+            self.record_seconds = max(seconds, 0.5)
+
+            row("Frame rate")
+            for fps in (24, 30, 60):
+                if imgui.radio_button(str(fps), recorder.fps == fps):
+                    recorder.fps = fps
+                imgui.same_line()
+            imgui.text_disabled("fps")
+
+            row("Size")
+            bw, bh = self.window.buffer_size
+            for label, scale in (("Full", 1.0), ("Half", 0.5)):
+                if imgui.radio_button(label, recorder.scale == scale):
+                    recorder.scale = scale
+                imgui.same_line()
+            imgui.text_disabled(f"{int(bw * recorder.scale)}x{int(bh * recorder.scale)}")
+            imgui.set_item_tooltip("Half: 4x fewer pixels to copy and encode, lighter on slow modules.")
+            imgui.end_table()
         imgui.end_disabled()
 
         imgui.separator()
+        # One row of buttons, whatever the state.
         if not recorder.recording:
             self.confirm_discard = False
-            if imgui.button("Start"):
+            imgui.push_style_color(imgui.Col_.button, (0.62, 0.14, 0.14, 1.0))
+            imgui.push_style_color(imgui.Col_.button_hovered, (0.80, 0.20, 0.20, 1.0))
+            imgui.push_style_color(imgui.Col_.button_active, (0.90, 0.26, 0.26, 1.0))
+            if imgui.button("Record"):
                 self.toggle_recording()
-            imgui.set_item_tooltip("F9")
+            imgui.pop_style_color(3)
+            imgui.same_line()
+            imgui.text_disabled("F9")
         elif self.confirm_discard:
+            imgui.align_text_to_frame_padding()
             imgui.text("Delete this recording?")
-            if imgui.button("Yes, discard"):
+            imgui.same_line()
+            if imgui.button("Delete"):
                 recorder.discard()
                 self.confirm_discard = False
             imgui.same_line()
-            if imgui.button("Keep recording"):
+            if imgui.button("Keep"):
                 self.confirm_discard = False
         else:
             if imgui.button("Resume" if recorder.paused else "Pause"):
@@ -392,13 +416,33 @@ class Window:
             if imgui.button("Stop and save"):
                 recorder.stop()
             imgui.set_item_tooltip("F9")
+            # Discard sits apart, at the right edge, away from Stop and save.
             imgui.same_line()
+            discard_width = imgui.calc_text_size("Discard").x + 2.0 * imgui.get_style().frame_padding.x
+            imgui.set_cursor_pos_x(
+                imgui.get_cursor_pos_x() + imgui.get_content_region_avail().x - discard_width
+            )
             if imgui.button("Discard"):
                 self.confirm_discard = True
 
-        if recorder.message:
-            imgui.text_disabled(recorder.message)
-        imgui.text_disabled("Only the 3D view is recorded, not these windows.")
+        # Status block, two lines high: the clock (and progress) while
+        # recording, otherwise the last message or a hint.
+        top = imgui.get_cursor_pos_y()
+        if recorder.recording:
+            text, color = self.recording_status()
+            imgui.text_colored(color, text)
+            if recorder.duration is not None:
+                imgui.same_line()
+                bar_height = imgui.get_text_line_height()
+                imgui.progress_bar(recorder.elapsed / recorder.duration, (-1.0, bar_height), "")
+            imgui.text_disabled(f"to {recorder.path.name}")
+        else:
+            imgui.push_style_color(imgui.Col_.text, imgui.get_style_color_vec4(imgui.Col_.text_disabled))
+            imgui.text_wrapped(recorder.message or "Only the 3D view is recorded, not these windows.")
+            imgui.pop_style_color()
+        reserved = top + 2.0 * imgui.get_text_line_height_with_spacing()
+        imgui.set_cursor_pos_y(max(reserved, imgui.get_cursor_pos_y()))
+        imgui.dummy((0.0, 0.0))
         imgui.end()
 
     def request_reset(self):

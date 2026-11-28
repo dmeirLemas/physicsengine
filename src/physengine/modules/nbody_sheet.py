@@ -5,7 +5,9 @@ Display. Two things are drawn on a grid in the plane z = 0:
 - Dips at the bodies, deeper for heavier ones. This is the familiar rubber-
   sheet picture: an illustration of "mass curves spacetime", not a
   computed quantity. Its depth and width are chosen for looks and follow the
-  zoom.
+  zoom. Depth goes as mass^(1/4), so that a planet's dip still shows next to
+  its star's (in true proportion it would be thousands of times shallower);
+  lighter bodies also get a narrower dip.
 - Gravitational waves, from the quadrupole formula (postnewtonian.py). An
   observer in the orbital plane at distance r, in direction n from the
   centre of mass, sees the "plus" polarisation
@@ -21,7 +23,7 @@ Height scale of the waves: what is drawn is r h_+, the strain with its 1 / r
 fall-off taken out, so that ripples keep their height on the way out and the
 growth of the signal itself (the "chirp") is what shows. The largest r h a
 binary can reach is of order G M / (12 c^2) (at merger, v^2 ~ c^2 / 6); that
-is drawn WAVE_HEIGHT of the sheet's half-width high, times the user's gain.
+is drawn WAVE_HEIGHT of the sheet's extent high, times the user's gain.
 Weak-field systems (planets) therefore show nothing at gain 1: their waves
 really are ~1e-8 of a merger's.
 """
@@ -33,9 +35,15 @@ HISTORY = 2048  # steps of quadrupole history kept
 MAX_BODIES = 16  # dips drawn for the heaviest ones
 LINES = 128  # grid lines each way
 SEGMENTS = 384  # per line
+# Heights and widths are fractions of the sheet's "extent", a length that
+# follows the camera distance smoothly. (The grid's half-width snaps to powers
+# of two to keep the lines still; heights tied to it would jump on zooming.)
+EXTENT = 1.6 * 2.0**0.5  # extent / camera distance: the middle of the half-width's range
 WAVE_HEIGHT = 0.075
 WELL_DEPTH = 0.05
 WELL_WIDTH = 0.04
+WELL_EXPONENT = 0.25  # dip depth ~ (mass / heaviest mass) ^ this
+WELL_NARROWEST = 0.5  # width of the lightest bodies' dips, as a fraction of the heaviest's
 
 VERTEX = """
 #version 460 core
@@ -43,7 +51,8 @@ uniform mat4 view;
 uniform mat4 proj;
 uniform vec2 centre;         // sheet centre relative to the camera target
 uniform float half_width;
-uniform vec3 body[16];       // xy relative to the camera target, z = relative mass (0..1)
+uniform float extent;        // length that heights and widths scale with (follows the zoom smoothly)
+uniform vec3 body[16];       // xy relative to the camera target, z = relative dip depth (0..1)
 uniform int n_bodies;
 uniform sampler2D history;   // Qdd_xx, Qdd_xy, Qdd_yy, Qdd_zz per step, G / c^4 included
 uniform float head;          // index of the newest sample
@@ -53,6 +62,7 @@ uniform vec2 com;            // centre of mass relative to the camera target
 uniform float wave_scale;    // sheet height per unit of r h
 uniform float well_depth;
 uniform float well_width;
+uniform float well_narrowest;
 
 in vec2 in_grid;             // -1..1
 out float v_wave;
@@ -71,7 +81,8 @@ void main() {
     float z = 0.0;
     for (int i = 0; i < n_bodies; i++) {
         float d = length(p - body[i].xy);
-        z -= well_depth * body[i].z * well_width / sqrt(d * d + well_width * well_width);
+        float w = well_width * mix(well_narrowest, 1.0, body[i].z);
+        z -= well_depth * body[i].z * w / sqrt(d * d + w * w);
     }
     vec2 rel = p - com;
     float r = length(rel);
@@ -87,18 +98,18 @@ void main() {
     v_wave = wave * wave_scale;
     z += v_wave;
     v_edge = length(in_grid);
-    gl_Position = proj * view * vec4(p, z - 0.02 * half_width, 1.0);
+    gl_Position = proj * view * vec4(p, z - 0.02 * extent, 1.0);
 }
 """
 
 FRAGMENT = """
 #version 460 core
-uniform float half_width;
+uniform float extent;
 in float v_wave;
 in float v_edge;
 out vec4 frag_color;
 void main() {
-    float w = clamp(v_wave / (0.03 * half_width), -1.0, 1.0);
+    float w = clamp(v_wave / (0.03 * extent), -1.0, 1.0);
     vec3 base = vec3(0.20, 0.32, 0.62);
     vec3 crest = vec3(1.0, 0.72, 0.30);
     vec3 trough = vec3(0.30, 0.85, 1.0);
@@ -149,12 +160,13 @@ class SpacetimeSheet:
         # while the camera moves and zooms.
         half_width = 2.0 ** np.ceil(np.log2(1.6 * camera.distance))
         cell = 2.0 * half_width / LINES
+        extent = EXTENT * camera.distance
         centre = np.round(target[:2] / cell) * cell - target[:2]
 
         heavy = np.argsort(mass)[::-1][:MAX_BODIES]
         bodies = np.zeros((MAX_BODIES, 3), dtype="f4")
         bodies[: len(heavy), :2] = pos[heavy, :2] - target[:2]
-        bodies[: len(heavy), 2] = np.sqrt(mass[heavy] / mass.max())
+        bodies[: len(heavy), 2] = (mass[heavy] / mass.max()) ** WELL_EXPONENT
         com = mass @ pos[:, :2] / mass.sum() - target[:2]
 
         view = camera.view().copy()
@@ -164,6 +176,7 @@ class SpacetimeSheet:
         p["proj"].write(camera.projection().T.astype("f4").tobytes())
         p["centre"].value = tuple(float(v) for v in centre)
         p["half_width"].value = float(half_width)
+        p["extent"].value = float(extent)
         p["body"].write(bodies.tobytes())
         p["n_bodies"].value = len(heavy)
         p["head"].value = float(max(self.head, 0) % HISTORY + HISTORY)
@@ -171,9 +184,10 @@ class SpacetimeSheet:
         p["light_step"].value = float(light_step)
         p["com"].value = tuple(float(v) for v in com)
         reference = strain_unit / 12.0  # largest r h
-        p["wave_scale"].value = float(gain * WAVE_HEIGHT * half_width / max(reference, 1e-300))
-        p["well_depth"].value = float(WELL_DEPTH * half_width)
-        p["well_width"].value = float(WELL_WIDTH * half_width)
+        p["wave_scale"].value = float(gain * WAVE_HEIGHT * extent / max(reference, 1e-300))
+        p["well_depth"].value = float(WELL_DEPTH * extent)
+        p["well_width"].value = float(WELL_WIDTH * extent)
+        p["well_narrowest"].value = WELL_NARROWEST
         self.texture.write(self.q.tobytes())
         self.texture.use(0)
         p["history"].value = 0
