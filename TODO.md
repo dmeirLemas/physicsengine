@@ -32,6 +32,13 @@ Status as of 2026-11-20.
   override, 2026-11-22; review the physics). Event display in a CMS-like
   detector with invariant-mass histogram. See "Module 4" below.
 
+- **Removed 2026-11-26** (user's request): the particle module's Custom event
+  type (`particle_custom.py`, `particle_editor.py`, including the pair -> Z
+  collisions and particle save/load) and the atom module's "Decay of a sample"
+  and "Decay chain" scenes. Mentions of them further down are history. Now
+  unused by the app but still tested: the B, D and Ds physics,
+  `breit_wigner_formation`, and `build_chain` / `DecaySample` / `bateman`.
+
 ## Galaxies: still to do
 
 - [x] Customisable galaxy setup (2026-11-20, Claude under override; review
@@ -371,3 +378,14 @@ Save/load, home, galaxy:
       in .gitignore.
 - [ ] Galaxy saves accept absurdly small particle counts (bounds are a
       physics choice).
+
+Looks, 2026-11-28 (Claude; display and UI only):
+- [x] Spacetime sheet: dip depth goes as mass^(1/4) (was the square root),
+      lighter bodies get narrower dips; dip and wave heights follow the
+      camera distance smoothly instead of the grid's power-of-two half-width
+      (no jump on zooming).
+- [x] Recording window: label column with radio rows, red Record button,
+      Discard apart from Stop and save, fixed window size in every state.
+- [ ] Sheet: the near-source fade of the waves (`soft` in the vertex shader)
+      still uses the snapped half-width; left alone because it sits in the
+      wave formula. Earth-mass dips beside a star are still only ~3 px.
